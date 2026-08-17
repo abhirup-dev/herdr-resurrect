@@ -47,7 +47,8 @@ type Pane struct {
 	Agent     string            `json:"agent,omitempty"` // detected kind (claude, codex, pi...)
 	Name      string            `json:"name,omitempty"`  // herdr agent name
 	State     string            `json:"state,omitempty"`
-	SID       string            `json:"sid,omitempty"` // native session reference
+	Title     string            `json:"title,omitempty"` // terminal title at capture (icon source)
+	SID       string            `json:"sid,omitempty"`   // native session reference
 	SIDSource string            `json:"sid_source,omitempty"`
 	Cwd       string            `json:"cwd"`
 	Argv      []string          `json:"argv,omitempty"` // foreground process argv

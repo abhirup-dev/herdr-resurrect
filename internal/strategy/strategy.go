@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // SessionOnDisk reports whether the captured native session still exists on
@@ -188,6 +190,71 @@ func ProviderLabel(kind string, env map[string]string) string {
 }
 
 func caseLocal(h string) bool { return strings.HasPrefix(h, "localhost") }
+
+// GlyphFor returns a one-rune icon for an agent kind. Preference order:
+// the agent's own terminal title (agents self-brand: claude sets "✳ Claude
+// Code", pi sets "π - pi" — captured in the manifest), then a curated brand
+// map, then a neutral dot.
+func GlyphFor(kind, title string) string {
+	if title != "" {
+		if r := []rune(title)[0]; r > 0x7E { // agents self-brand their title's first rune
+			return string(r)
+		}
+	}
+	if g, ok := kindGlyphs[kind]; ok {
+		return g
+	}
+	return "●"
+}
+
+var kindGlyphs = map[string]string{
+	"claude":      "✳",
+	"codex":       "∞",
+	"pi":          "π",
+	"grok":        "✕",
+	"kimi":        "☾",
+	"copilot":     "🪁",
+	"cursor":      "▮",
+	"droid":       "🤖",
+	"devin":       "🧠",
+	"opencode":    "⌨",
+	"kilo":        "⚖",
+	"qodercli":    "⌘",
+	"antigravity": "🚀",
+	"omp":         "◆",
+	"shell":       "·",
+}
+
+// ColorFor is a brand-ish accent per kind, for styling glyphs.
+func ColorFor(kind string) string {
+	if c, ok := kindColors[kind]; ok {
+		return c
+	}
+	return "8"
+}
+
+var kindColors = map[string]string{
+	"claude":      "#D97757",
+	"codex":       "#10A37F",
+	"pi":          "#C678DD",
+	"grok":        "#E5E7EB",
+	"kimi":        "#7C7CE0",
+	"copilot":     "#8957E5",
+	"cursor":      "#38BDF8",
+	"droid":       "#22D3EE",
+	"devin":       "#6EE7B7",
+	"opencode":    "#F59E0B",
+	"kilo":        "#94A3B8",
+	"qodercli":    "#38BDF8",
+	"antigravity": "#F472B6",
+	"omp":         "#A78BFA",
+	"shell":       "8",
+}
+
+// GlyphStyled renders the glyph in the kind's brand color.
+func GlyphStyled(kind, title string) string {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(ColorFor(kind))).Render(GlyphFor(kind, title))
+}
 
 // TranscriptSize returns the on-disk size of an agent's native transcript,
 // so snapshots can show what a restore actually carries back.

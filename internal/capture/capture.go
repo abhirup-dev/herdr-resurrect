@@ -31,12 +31,13 @@ type paneEntry struct {
 	WorkspaceID string `json:"workspace_id"`
 }
 type agentEntry struct {
-	Name         string `json:"name"`
-	Agent        string `json:"agent"`
-	Status       string `json:"agent_status"`
-	Cwd          string `json:"cwd"`
-	PaneID       string `json:"pane_id"`
-	AgentSession *struct {
+	Name          string `json:"name"`
+	Agent         string `json:"agent"`
+	Status        string `json:"agent_status"`
+	Cwd           string `json:"cwd"`
+	PaneID        string `json:"pane_id"`
+	TerminalTitle string `json:"terminal_title"`
+	AgentSession  *struct {
 		Value  string `json:"value"`
 		Source string `json:"source"`
 	} `json:"agent_session"`
@@ -159,6 +160,7 @@ func capturePane(scope []string, p paneEntry, agent agentEntry) (manifest.Pane, 
 		mp.Agent = agent.Agent
 		mp.Name = agent.Name
 		mp.State = agent.Status
+		mp.Title = agent.TerminalTitle
 		mp.Cwd = firstNonEmpty(agent.Cwd, p.Cwd)
 		if agent.AgentSession != nil {
 			mp.SID = agent.AgentSession.Value

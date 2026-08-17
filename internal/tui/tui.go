@@ -249,9 +249,9 @@ func (i sessionItem) Description() string {
 	if i.row.latest == nil {
 		return "no snapshots — press c to capture"
 	}
-	agents, size, _ := snapshotStats(i.row.latest)
+	_, size, _ := snapshotStats(i.row.latest)
 	return fmt.Sprintf("last %s · %d %s · %s transcripts · %s",
-		relTime(i.row.latest.CreatedAt.Local()), i.row.agents, plural(i.row.agents, "agent"), humanBytes(size), agents)
+		relTime(i.row.latest.CreatedAt.Local()), i.row.agents, plural(i.row.agents, "agent"), humanBytes(size), agentRoster(i.row.latest))
 }
 func (i sessionItem) FilterValue() string { return i.row.name }
 
@@ -268,9 +268,9 @@ func (i snapshotItem) Title() string {
 	if i.row.err != nil || i.row.snap == nil {
 		return mark + " unreadable snapshot"
 	}
-	agents, size, n := snapshotStats(i.row.snap)
+	_, size, n := snapshotStats(i.row.snap)
 	return fmt.Sprintf("%s %s — %d %s · %s · %s", mark, relTime(i.row.snap.CreatedAt.Local()),
-		n, plural(n, "agent"), agents, humanBytes(size))
+		n, plural(n, "agent"), agentRoster(i.row.snap), humanBytes(size))
 }
 func (i snapshotItem) Description() string { return "" }
 func (i snapshotItem) FilterValue() string {
@@ -296,7 +296,7 @@ func (m *model) syncSnapList() {
 var planColumns = []table.Column{
 	{Title: "sel", Width: 3},
 	{Title: "agent", Width: 14},
-	{Title: "kind → provider", Width: 20},
+	{Title: "kind → provider", Width: 22},
 	{Title: "verdict", Width: 11},
 	{Title: "disk", Width: 7},
 	{Title: "why", Width: 34},
@@ -320,9 +320,13 @@ func (m *model) syncTable() {
 		if kind == "" {
 			kind = "shell"
 		}
-		who := kind
+		glyphKind := pp.Manifest.Agent
+		if glyphKind == "" {
+			glyphKind = "shell"
+		}
+		who := strategy.GlyphFor(glyphKind, pp.Manifest.Title) + " " + kind
 		if prov := strategy.ProviderLabel(pp.Manifest.Agent, pp.Manifest.Env); prov != "" && prov != kind {
-			who = kind + " → " + prov
+			who = who + " → " + prov
 		}
 		size := strategy.TranscriptSize(pp.Manifest.Agent, pp.Manifest.SID, pp.Manifest.Env)
 		reason := pp.Reason
@@ -385,6 +389,24 @@ func snapshotStats(s *manifest.Snapshot) (agents string, size int64, n int) {
 	return agents, size, len(names)
 }
 
+// agentRoster renders the fleet with per-kind icons: ✳glmlab ∞codexlab πpilab.
+func agentRoster(s *manifest.Snapshot) string {
+	if s == nil {
+		return "—"
+	}
+	var names []string
+	for _, p := range s.AgentPanes() {
+		names = append(names, strategy.GlyphStyled(p.Agent, p.Title)+p.Key)
+	}
+	if len(names) > 4 {
+		return strings.Join(names[:4], " ") + " …"
+	}
+	if len(names) == 0 {
+		return "shells only"
+	}
+	return strings.Join(names, " ")
+}
+
 func plural(n int, s string) string {
 	if n == 1 {
 		return s
@@ -442,7 +464,12 @@ func (m *model) previewLines() []string {
 				if prov != "" && prov != kind {
 					who = kind + "→" + prov
 				}
-				out = append(out, fmt.Sprintf("  %s   %s %-14s %-18s %s", pb, glyph, pbranch+" "+p.Key, who, act))
+				iconKind := p.Agent
+				if iconKind == "" {
+					iconKind = "shell"
+				}
+				icon := strategy.GlyphStyled(iconKind, p.Title)
+				out = append(out, fmt.Sprintf("  %s   %s %-16s %-18s %s", pb, glyph, pbranch+" "+icon+" "+p.Key, who, act))
 			}
 		}
 	}
