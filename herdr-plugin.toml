@@ -1,0 +1,16 @@
+id = "herdr-archive"
+name = "Herdr Archive"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "tmux-resurrect for herdr: capture, archive, and env-faithfully resume sessions, workspaces, and agents."
+platforms = ["macos", "linux"]
+
+# plugin link does not run build commands; local authors build themselves.
+[[build]]
+command = ["go", "build", "-o", "bin/herdr-archive", "."]
+
+[[actions]]
+id = "ping"
+title = "herdr-archive smoke test (dump plugin context)"
+contexts = ["global"]
+command = ["./bin/herdr-archive", "action", "ping"]
