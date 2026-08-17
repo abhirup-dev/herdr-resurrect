@@ -14,3 +14,13 @@ id = "ping"
 title = "herdr-archive smoke test (dump plugin context)"
 contexts = ["global"]
 command = ["./bin/herdr-archive", "action", "ping"]
+
+# The interactive browser. Opens as a session-modal popup; closes when the
+# TUI exits. Also available as a plain verb: `herdr-archive browse`.
+[[panes]]
+id = "browser"
+title = "herdr-archive"
+placement = "popup"
+width = "80%"
+height = 24
+command = ["./bin/herdr-archive", "browse"]

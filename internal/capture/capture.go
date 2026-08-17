@@ -240,15 +240,27 @@ func psEnv(pid int) (map[string]string, error) {
 	return env, nil
 }
 
-func findSession(name string) (*sessionEntry, error) {
+// SessionInfo is the exported session-listing row.
+type SessionInfo sessionEntry
+
+// Sessions lists every herdr session on the machine.
+func Sessions() ([]SessionInfo, error) {
 	var list struct {
-		Sessions []sessionEntry `json:"sessions"`
+		Sessions []SessionInfo `json:"sessions"`
 	}
 	if err := herdr.RunRawInto(&list, "session", "list", "--json"); err != nil {
 		return nil, err
 	}
-	for i := range list.Sessions {
-		s := &list.Sessions[i]
+	return list.Sessions, nil
+}
+
+func findSession(name string) (*sessionEntry, error) {
+	sessions, err := Sessions()
+	if err != nil {
+		return nil, err
+	}
+	for i := range sessions {
+		s := (*sessionEntry)(&sessions[i])
 		if s.Default && name == "default" || s.Name == name {
 			return s, nil
 		}

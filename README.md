@@ -81,17 +81,29 @@ The same diff runs against a live session without stop — in-place repair.
    captured `ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.3[1m]` is the wrapper's own
    trick, replayed without knowing it.
 
+## Browsing (TUI)
+
+```
+herdr-archive browse                                  # any terminal
+herdr plugin pane open --plugin herdr-archive --entrypoint browser
+                                                      # popup inside herdr
+```
+
+Sessions → snapshots (`●` = `last`) → live diff plan (async, settle-aware).
+`y` runs `resume --yes` full-screen via `tea.ExecProcess` and re-diffs after.
+Bubble Tea + Lip Gloss, no other deps.
+
 ## Plugin
 
-`herdr plugin link <repo>` — the manifest currently exposes only a `ping`
-smoke action; all real verbs are CLI (deliberate: no automatic capture yet).
-`HERDR_BIN_PATH` is honored so the same binary works as a plugin command.
+`herdr plugin link <repo>` — manifest exposes the `browser` popup pane and a
+`ping` smoke action; all real verbs are CLI (deliberate: no automatic
+capture yet). `HERDR_BIN_PATH` is honored so the same binary works as a
+plugin command.
 
 ## Not yet
 
 - `archive-all` (iterate sessions; the loop is trivial, policy is not)
 - `status` verb (resume dry-run covers the audit for now)
-- TUI snapshot browser (`plugin pane` popup + bubbletea)
 - Linux (`/proc/<pid>/environ` instead of `ps Ewww`)
 - Env values with spaces: `ps` tokenizes unquoted; provider vars in
   practice don't contain spaces

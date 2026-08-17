@@ -13,6 +13,8 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"github.com/abhirupdas/herdr-archive/internal/tui"
 )
 
 const usage = `herdr-archive — capture, archive, and resume herdr sessions env-faithfully
@@ -25,6 +27,7 @@ usage:
   herdr-archive park     --workspace <ID> [--session NAME]   capture + workspace close
   herdr-archive unpark   --from <manifest> [--into SESSION]  recreate workspace + relaunch
   herdr-archive status   [--all]                             audit live vs manifests
+  herdr-archive browse                                       snapshot picker TUI
   herdr-archive action   <id>                                plugin action entrypoint
 
 selectors: --workspace ID | --tab ID | --agent NAME   (partial resume)
@@ -52,6 +55,13 @@ func main() {
 		code = cmdUnpark(os.Args[2:])
 	case "status":
 		code = notImplemented("status")
+	case "browse":
+		if err := tui.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "browse: %v\n", err)
+			code = 1
+		} else {
+			code = 0
+		}
 	case "action":
 		code = action(os.Args[2:])
 	case "-h", "--help", "help":
