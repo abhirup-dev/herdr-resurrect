@@ -43,11 +43,11 @@ type Tab struct {
 // are never reused by herdr and are informational only.
 type Pane struct {
 	Key       string            `json:"key"`
-	PaneID    string            `json:"pane_id"` // informational, never identity
-	Agent     string            `json:"agent,omitempty"`  // detected kind (claude, codex, pi...)
-	Name      string            `json:"name,omitempty"`   // herdr agent name
+	PaneID    string            `json:"pane_id"`         // informational, never identity
+	Agent     string            `json:"agent,omitempty"` // detected kind (claude, codex, pi...)
+	Name      string            `json:"name,omitempty"`  // herdr agent name
 	State     string            `json:"state,omitempty"`
-	SID       string            `json:"sid,omitempty"`    // native session reference
+	SID       string            `json:"sid,omitempty"` // native session reference
 	SIDSource string            `json:"sid_source,omitempty"`
 	Cwd       string            `json:"cwd"`
 	Argv      []string          `json:"argv,omitempty"` // foreground process argv
@@ -137,6 +137,37 @@ func (s *Snapshot) AgentPanes() []Pane {
 					out = append(out, p)
 				}
 			}
+		}
+	}
+	return out
+}
+
+// Filter returns the sub-snapshot matching the selectors. Empty selectors
+// keep everything. This is the partial-resume subset.
+func (s *Snapshot) Filter(wsID, tabID, agentKey string) *Snapshot {
+	out := &Snapshot{Version: s.Version, CreatedAt: s.CreatedAt, Session: s.Session, SessionDir: s.SessionDir}
+	for _, w := range s.Workspaces {
+		if wsID != "" && w.ID != wsID && w.Label != wsID {
+			continue
+		}
+		mw := Workspace{ID: w.ID, Label: w.Label, Cwd: w.Cwd}
+		for _, t := range w.Tabs {
+			if tabID != "" && t.ID != tabID && t.Label != tabID {
+				continue
+			}
+			mt := Tab{ID: t.ID, Label: t.Label}
+			for _, p := range t.Panes {
+				if agentKey != "" && p.Key != agentKey && p.Name != agentKey && p.PaneID != agentKey {
+					continue
+				}
+				mt.Panes = append(mt.Panes, p)
+			}
+			if len(mt.Panes) > 0 {
+				mw.Tabs = append(mw.Tabs, mt)
+			}
+		}
+		if len(mw.Tabs) > 0 {
+			out.Workspaces = append(out.Workspaces, mw)
 		}
 	}
 	return out

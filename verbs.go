@@ -105,6 +105,9 @@ func cmdResume(args []string) int {
 	from := fs.String("from", "", "explicit snapshot path (default: latest for --session)")
 	out := fs.String("out", "", "archive root (default ~/.config/herdr/archives)")
 	yes := fs.Bool("yes", false, "apply the plan (default: dry-run)")
+	wsSel := fs.String("workspace", "", "partial: only this workspace (id or label)")
+	tabSel := fs.String("tab", "", "partial: only this tab (id or label)")
+	agentSel := fs.String("agent", "", "partial: only this agent (name or key)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -118,9 +121,14 @@ func cmdResume(args []string) int {
 			return 1
 		}
 	}
-	snap, err := manifest.Load(path)
+	full, err := manifest.Load(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "resume: %v\n", err)
+		return 1
+	}
+	snap := full.Filter(*wsSel, *tabSel, *agentSel)
+	if len(snap.Workspaces) == 0 {
+		fmt.Fprintln(os.Stderr, "resume: selectors matched nothing")
 		return 1
 	}
 
@@ -157,4 +165,103 @@ func cmdResume(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func cmdPark(args []string) int {
+	fs := flag.NewFlagSet("park", flag.ContinueOnError)
+	session := fs.String("session", "default", "herdr session holding the workspace")
+	workspace := fs.String("workspace", "", "workspace to park (id or label, required)")
+	out := fs.String("out", "", "archive root (default ~/.config/herdr/archives)")
+	yes := fs.Bool("yes", false, "actually close the workspace (default: dry-run)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *workspace == "" {
+		fmt.Fprintln(os.Stderr, "park: --workspace is required")
+		return 2
+	}
+	snap, err := capture.Session(capture.Options{Session: *session, WorkspaceIDs: []string{*workspace}})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "park: %v\n", err)
+		return 1
+	}
+	// Label-based selection: resolve to the captured id.
+	if len(snap.Workspaces) == 0 {
+		fmt.Fprintf(os.Stderr, "park: workspace %q not found\n", *workspace)
+		return 1
+	}
+	wid := snap.Workspaces[0].ID
+	for _, t := range snap.Workspaces[0].Tabs {
+		for _, p := range t.Panes {
+			fmt.Printf("  park %-12s %-8s sid=%-9s env=%d\n", p.Key, or(p.Agent, "shell"), short(p.SID, 8), len(p.Env))
+		}
+	}
+	if !*yes {
+		fmt.Println("dry run; apply with --yes (workspace stays open)")
+		return 0
+	}
+	if _, err := snap.Save(*out); err != nil {
+		fmt.Fprintf(os.Stderr, "park: save: %v\n", err)
+		return 1
+	}
+	if _, err := herdr.Run(append(herdr.SessionScope(*session), "workspace", "close", wid)...); err != nil {
+		fmt.Fprintf(os.Stderr, "park: close: %v\n", err)
+		return 1
+	}
+	fmt.Printf("parked %s (snapshot kept under archives/%s)\n", wid, snap.Session)
+	return 0
+}
+
+func cmdUnpark(args []string) int {
+	fs := flag.NewFlagSet("unpark", flag.ContinueOnError)
+	session := fs.String("session", "default", "source session of the snapshot")
+	into := fs.String("into", "", "target session to recreate in (default: same as --session)")
+	from := fs.String("from", "", "explicit snapshot path (default: latest for --session)")
+	out := fs.String("out", "", "archive root (default ~/.config/herdr/archives)")
+	yes := fs.Bool("yes", false, "actually recreate (default: dry-run)")
+	wsSel := fs.String("workspace", "", "only this workspace (id or label)")
+	tabSel := fs.String("tab", "", "only this tab (id or label)")
+	agentSel := fs.String("agent", "", "only this agent (name or key)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	path := *from
+	if path == "" {
+		var err error
+		path, err = manifest.Latest(*out, *session)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "unpark: %v\n", err)
+			return 1
+		}
+	}
+	full, err := manifest.Load(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "unpark: %v\n", err)
+		return 1
+	}
+	snap := full.Filter(*wsSel, *tabSel, *agentSel)
+	if len(snap.Workspaces) == 0 {
+		fmt.Fprintln(os.Stderr, "unpark: selectors matched nothing")
+		return 1
+	}
+	target := or(*into, snap.Session)
+	if err := resume.EnsureServer(target); err != nil {
+		fmt.Fprintf(os.Stderr, "unpark: %v\n", err)
+		return 1
+	}
+	if err := resume.Unpark(target, snap, !*yes); err != nil {
+		fmt.Fprintf(os.Stderr, "unpark: %v\n", err)
+		return 1
+	}
+	if !*yes {
+		fmt.Println("dry run; apply with --yes")
+	}
+	return 0
+}
+
+func short(s string, n int) string {
+	if len(s) <= n {
+		return or(s, "-")
+	}
+	return s[:n]
 }

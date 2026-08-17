@@ -111,11 +111,32 @@ func ReplayEnv(env map[string]string) map[string]string {
 	return out
 }
 
-// RelaunchCmdline composes the shell command for pane run.
+// RelaunchCmdline composes the shell command for pane run. If argv already
+// carries the resume fragment (the pane was captured while resuming), the
+// fragment is not appended twice.
 func RelaunchCmdline(argv []string, resumeArgs []string) string {
 	parts := append([]string{}, argv...)
-	parts = append(parts, resumeArgs...)
+	if len(resumeArgs) > 0 {
+		joined := strings.Join(parts, " ")
+		sid := resumeArgs[len(resumeArgs)-1]
+		if !strings.Contains(joined, sid) {
+			parts = append(parts, resumeArgs...)
+		}
+	}
 	return strings.Join(parts, " ")
+}
+
+// LaunchCmdline is RelaunchCmdline with fallbacks for processes whose argv
+// is hidden from the process table (pi reports argv0 only): try herdr's
+// cmdline, then the detected agent kind as the bare command.
+func LaunchCmdline(argv []string, cmdline, kind string, resumeArgs []string) string {
+	if len(argv) == 0 && cmdline != "" {
+		argv = strings.Fields(cmdline)
+	}
+	if len(argv) == 0 && kind != "" {
+		argv = []string{kind}
+	}
+	return RelaunchCmdline(argv, resumeArgs)
 }
 
 // Describe renders argv for one-line plans.

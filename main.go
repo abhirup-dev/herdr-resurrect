@@ -47,9 +47,9 @@ func main() {
 	case "resume":
 		code = cmdResume(os.Args[2:])
 	case "park":
-		code = notImplemented("park")
+		code = cmdPark(os.Args[2:])
 	case "unpark":
-		code = notImplemented("unpark")
+		code = cmdUnpark(os.Args[2:])
 	case "status":
 		code = notImplemented("status")
 	case "action":

@@ -31,11 +31,11 @@ type paneEntry struct {
 	WorkspaceID string `json:"workspace_id"`
 }
 type agentEntry struct {
-	Name   string `json:"name"`
-	Agent  string `json:"agent"`
-	Status string `json:"agent_status"`
-	Cwd    string `json:"cwd"`
-	PaneID string `json:"pane_id"`
+	Name         string `json:"name"`
+	Agent        string `json:"agent"`
+	Status       string `json:"agent_status"`
+	Cwd          string `json:"cwd"`
+	PaneID       string `json:"pane_id"`
 	AgentSession *struct {
 		Value  string `json:"value"`
 		Source string `json:"source"`
@@ -43,7 +43,7 @@ type agentEntry struct {
 }
 type processInfo struct {
 	ForegroundProcessGroupID int `json:"foreground_process_group_id"`
-	ForegroundProcesses []struct {
+	ForegroundProcesses      []struct {
 		Argv    []string `json:"argv"`
 		Cmdline string   `json:"cmdline"`
 		Cwd     string   `json:"cwd"`

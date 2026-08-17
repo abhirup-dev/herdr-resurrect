@@ -21,18 +21,18 @@ import (
 type Action string
 
 const (
-	KeepNative  Action = "KEEP-NATIVE"  // live pane is faithful; nothing to do
-	Replace     Action = "REPLACE"      // env/provider lost: relaunch from manifest
-	Relaunch    Action = "RELAUNCH"     // no sid: fresh conversation, argv+env replay
-	ShellKeep   Action = "SHELL"        // shell pane; snapshot restore covers it
-	Resurrect   Action = "RESURRECT"    // manifest pane with no live counterpart
+	KeepNative Action = "KEEP-NATIVE" // live pane is faithful; nothing to do
+	Replace    Action = "REPLACE"     // env/provider lost: relaunch from manifest
+	Relaunch   Action = "RELAUNCH"    // no sid: fresh conversation, argv+env replay
+	ShellKeep  Action = "SHELL"       // shell pane; snapshot restore covers it
+	Resurrect  Action = "RESURRECT"   // manifest pane with no live counterpart
 )
 
 type PanePlan struct {
 	Manifest manifest.Pane
 	Live     *manifest.Pane // nil when the pane vanished entirely
 	Action   Action
-	Fresh    bool   // true = relaunch without --resume (sid dead or absent)
+	Fresh    bool // true = relaunch without --resume (sid dead or absent)
 	Reason   string
 }
 
@@ -257,15 +257,26 @@ func Apply(plan *Plan, dryRun bool) error {
 		if pp.Action != Replace && pp.Action != Relaunch && pp.Action != Resurrect {
 			continue
 		}
-		relaunch := strategy.RelaunchCmdline(pp.Manifest.Argv, resumeArgsFor(pp))
+		relaunch := strategy.LaunchCmdline(pp.Manifest.Argv, pp.Manifest.Cmdline, pp.Manifest.Agent, resumeArgsFor(pp))
 		fmt.Printf("  %-12s %s\n", pp.Action, pp.Manifest.Key)
 		fmt.Printf("               %s\n", relaunch)
 		fmt.Printf("               cwd=%s env=%d vars\n", pp.Manifest.Cwd, len(strategy.ReplayEnv(pp.Manifest.Env)))
 		if dryRun {
 			continue
 		}
-		if err := applyPane(plan.Session, pp, relaunch); err != nil {
+		anchor := pp.Manifest.PaneID // restored panes keep ids
+		if pp.Live != nil {
+			anchor = pp.Live.PaneID
+		}
+		np, err := launchPane(plan.Session, anchor, pp, relaunch)
+		if err != nil {
 			return fmt.Errorf("%s: %w", pp.Manifest.Key, err)
+		}
+		_ = np
+		if pp.Action != Resurrect && pp.Live != nil {
+			if _, err := herdr.Run(append(herdr.SessionScope(plan.Session), "pane", "close", anchor)...); err != nil {
+				return fmt.Errorf("%s: close old pane: %w", pp.Manifest.Key, err)
+			}
 		}
 	}
 	return nil
@@ -282,14 +293,11 @@ func resumeArgsFor(pp PanePlan) []string {
 	return args
 }
 
-func applyPane(session string, pp PanePlan, relaunch string) error {
+// launchPane splits a new pane beside anchor with the manifest env injected,
+// runs the relaunch command, waits for agent detection, and restores the
+// captured name. Returns the new pane id.
+func launchPane(session, anchor string, pp PanePlan, relaunch string) (string, error) {
 	scope := herdr.SessionScope(session)
-	anchor := pp.Manifest.PaneID // restored panes keep ids; verify below
-	if pp.Live != nil {
-		anchor = pp.Live.PaneID
-	}
-
-	// Build the new pane beside the old one (same tab), then retire the old.
 	args := append(append([]string{}, scope...), "pane", "split", "--pane", anchor,
 		"--direction", "right", "--ratio", "0.5", "--cwd", pp.Manifest.Cwd, "--no-focus")
 	for k, v := range strategy.ReplayEnv(pp.Manifest.Env) {
@@ -301,14 +309,13 @@ func applyPane(session string, pp PanePlan, relaunch string) error {
 		} `json:"pane"`
 	}
 	if err := herdr.RunInto(&split, args...); err != nil {
-		return fmt.Errorf("split: %w", err)
+		return "", fmt.Errorf("split: %w", err)
 	}
 	np := split.Pane.PaneID
 
 	if _, err := herdr.Run(append(scope, "pane", "run", np, relaunch)...); err != nil {
-		return fmt.Errorf("run: %w", err)
+		return np, fmt.Errorf("run: %w", err)
 	}
-	// Wait for herdr to detect the relaunched agent.
 	ok := false
 	for i := 0; i < 45; i++ {
 		var probe struct {
@@ -323,18 +330,93 @@ func applyPane(session string, pp PanePlan, relaunch string) error {
 		time.Sleep(time.Second)
 	}
 	if !ok {
-		return fmt.Errorf("agent not detected in %s within 45s", np)
+		return np, fmt.Errorf("agent not detected in %s within 45s", np)
 	}
 	// Re-attach the captured name: identity must survive the swap so herdr
 	// UX and future diffs match the pane by name again.
 	if pp.Manifest.Name != "" {
 		if _, err := herdr.Run(append(scope, "agent", "rename", np, pp.Manifest.Name)...); err != nil {
-			return fmt.Errorf("rename: %w", err)
+			return np, fmt.Errorf("rename: %w", err)
 		}
 	}
-	if pp.Action != Resurrect && pp.Live != nil {
-		if _, err := herdr.Run(append(scope, "pane", "close", anchor)...); err != nil {
-			return fmt.Errorf("close old pane: %w", err)
+	return np, nil
+}
+
+// Unpark recreates a filtered snapshot (one workspace, its tabs and panes)
+// inside a live target session. Each captured tab becomes a real tab; panes
+// split off the tab's root anchor, which is closed at the end.
+func Unpark(target string, snap *manifest.Snapshot, dryRun bool) error {
+	scope := herdr.SessionScope(target)
+	for _, w := range snap.Workspaces {
+		label := w.Label
+		if label == "" {
+			label = w.ID
+		}
+		cwd := w.Cwd
+		if cwd == "" && len(w.Tabs) > 0 && len(w.Tabs[0].Panes) > 0 {
+			cwd = w.Tabs[0].Panes[0].Cwd
+		}
+		fmt.Printf("  unpark %s (label=%s cwd=%s, %d tab(s))\n", w.ID, label, cwd, len(w.Tabs))
+		if dryRun {
+			for _, t := range w.Tabs {
+				for _, p := range t.Panes {
+					fmt.Printf("    %-12s %s\n", p.Key, strategy.Describe(p.Argv))
+				}
+			}
+			continue
+		}
+		var wsc struct {
+			Workspace struct {
+				WorkspaceID string `json:"workspace_id"`
+			} `json:"workspace"`
+		}
+		if err := herdr.RunInto(&wsc, append(scope, "workspace", "create", "--cwd", cwd, "--label", label, "--no-focus")...); err != nil {
+			return fmt.Errorf("workspace create: %w", err)
+		}
+		for _, t := range w.Tabs {
+			tabCwd := cwd
+			if len(t.Panes) > 0 {
+				tabCwd = t.Panes[0].Cwd
+			}
+			tlabel := t.Label
+			if tlabel == "" {
+				tlabel = t.ID
+			}
+			var tc struct {
+				RootPane struct {
+					PaneID string `json:"pane_id"`
+				} `json:"root_pane"`
+			}
+			if err := herdr.RunInto(&tc, append(scope, "tab", "create", "--workspace", wsc.Workspace.WorkspaceID, "--cwd", tabCwd, "--label", tlabel)...); err != nil {
+				return fmt.Errorf("tab create: %w", err)
+			}
+			anchor := tc.RootPane.PaneID
+			for _, p := range t.Panes {
+				// Shell panes materialize as the tab root itself; only
+				// agents are launched.
+				if p.Agent == "" {
+					continue
+				}
+				pp := PanePlan{Manifest: p, Action: Resurrect, Fresh: !strategy.SessionOnDisk(p.Agent, p.SID, p.Env)}
+				relaunch := strategy.LaunchCmdline(p.Argv, p.Cmdline, p.Agent, resumeArgsFor(pp))
+				fmt.Printf("    %-12s %s\n", p.Key, relaunch)
+				np, err := launchPane(target, anchor, pp, relaunch)
+				if err != nil {
+					return fmt.Errorf("%s: %w", p.Key, err)
+				}
+				anchor = np
+			}
+			anyAgent := false
+			for _, p := range t.Panes {
+				if p.Agent != "" {
+					anyAgent = true
+				}
+			}
+			if anyAgent {
+				if _, err := herdr.Run(append(scope, "pane", "close", tc.RootPane.PaneID)...); err != nil {
+					return fmt.Errorf("close anchor: %w", err)
+				}
+			}
 		}
 	}
 	return nil
