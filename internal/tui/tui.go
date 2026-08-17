@@ -1,5 +1,6 @@
 // Package tui is the browse picker: sessions -> snapshots -> plan with
-// per-agent restore selection. Minimal Bubble Tea + Lip Gloss.
+// per-agent restore selection and a layout preview. Built on bubbles
+// list / table / spinner primitives.
 package tui
 
 import (
@@ -11,6 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -26,13 +30,12 @@ var (
 	styOK      = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	styWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	styBad     = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	stySel     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("6"))
-	styFrame   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("8"))
+	styNice    = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
 	styVerdict = map[string]lipgloss.Style{
 		"KEEP-NATIVE": styOK,
 		"REPLACE":     styBad,
 		"RELAUNCH":    styWarn,
-		"RESURRECT":   lipgloss.NewStyle().Foreground(lipgloss.Color("5")),
+		"RESURRECT":   styNice,
 		"SHELL":       styDim,
 	}
 )
@@ -45,16 +48,13 @@ const (
 	viewPlan
 )
 
-const rowsShown = 12
-
 type sessionRow struct {
-	name     string
-	running  bool
-	snaps    []string // newest first, full paths
-	last     string   // snapshot the `last` symlink points at
-	latest   *manifest.Snapshot
-	agents   int
-	origName string // captured session name inside the latest snapshot
+	name    string
+	running bool
+	snaps   []string
+	last    string
+	latest  *manifest.Snapshot
+	agents  int
 }
 
 type snapshotRow struct {
@@ -63,19 +63,27 @@ type snapshotRow struct {
 	err  error
 }
 
-type planRow struct {
-	pp       resume.PanePlan
-	size     int64
-	provider string
-	selected bool
+type planData struct {
+	snap    *manifest.Snapshot
+	path    string
+	plan    *resume.Plan
+	planErr string
+	running bool
+	sel     []bool // per plan.Panes index
 }
 
 type model struct {
 	mode     mode
+	width    int
+	height   int
 	sessions []sessionRow
 	snaps    []snapshotRow
-	sel      int
-	scroll   int
+	sessList list.Model
+	snapList list.Model
+	tbl      table.Model
+	spin     spinner.Model
+	spinning bool
+	preview  bool
 	cur      *sessionRow
 	curSnap  string
 	plan     *planData
@@ -83,34 +91,51 @@ type model struct {
 	err      error
 }
 
-type planData struct {
-	snap    *manifest.Snapshot
-	path    string
-	plan    *resume.Plan
-	planErr string
-	running bool
-	rows    []planRow
-}
-
-type refreshedMsg struct{}
 type planMsg struct {
 	pd  *planData
 	err error
 }
+type refreshedMsg struct{}
+type errMsg struct{ err error }
 
 func Run() error {
-	m := &model{}
+	m := &model{
+		width:  96,
+		height: 24,
+		spin:   spinner.New(spinner.WithSpinner(spinner.Dot)),
+	}
 	if err := m.loadSessions(); err != nil {
 		return err
 	}
 	if len(m.sessions) == 0 {
 		return fmt.Errorf("no herdr sessions found")
 	}
-	_, err := tea.NewProgram(m).Run()
+	m.sessList = newList()
+	m.snapList = newList()
+	m.tbl = table.New(
+		table.WithColumns(planColumns),
+		table.WithWidth(92),
+		table.WithHeight(8),
+		table.WithStyles(table.Styles{
+			Header:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")),
+			Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("6")),
+		}),
+	)
+	m.syncSessionList()
+	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
 }
 
-// ---- data loading -----------------------------------------------------
+func newList() list.Model {
+	l := list.New([]list.Item{}, list.NewDefaultDelegate(), 88, 10)
+	l.SetShowTitle(false)
+	l.SetShowStatusBar(false)
+	l.SetShowHelp(false)
+	l.SetFilteringEnabled(true)
+	return l
+}
+
+// ---- data -------------------------------------------------------------
 
 func (m *model) loadSessions() error {
 	sess, err := capture.Sessions()
@@ -121,14 +146,14 @@ func (m *model) loadSessions() error {
 	for _, s := range sess {
 		seen[s.Name] = true
 	}
-	root := manifest.DefaultRoot()
-	entries, _ := os.ReadDir(root)
+	entries, _ := os.ReadDir(manifest.DefaultRoot())
 	for _, e := range entries {
 		if !e.IsDir() || seen[e.Name()] {
 			continue
 		}
 		sess = append(sess, capture.SessionInfo{Name: e.Name()})
 	}
+	m.sessions = nil
 	for i := range sess {
 		row := sessionRow{name: sess[i].Name, running: sess[i].Running}
 		dir := manifest.Dir("", row.name)
@@ -138,8 +163,7 @@ func (m *model) loadSessions() error {
 		row.snaps = matches
 		if len(matches) > 0 {
 			if snap, err := manifest.Load(matches[0]); err == nil {
-				row.latest = snap
-				row.agents = len(snap.AgentPanes())
+				row.latest, row.agents = snap, len(snap.AgentPanes())
 			}
 		}
 		m.sessions = append(m.sessions, row)
@@ -147,21 +171,22 @@ func (m *model) loadSessions() error {
 	return nil
 }
 
-// refreshSessions reloads session stats after an action, preserving the
-// selection by name.
 func (m *model) refreshSessions() {
-	sel := ""
-	if m.mode == viewSessions && m.sel < len(m.sessions) {
-		sel = m.sessions[m.sel].name
+	name := ""
+	if m.mode == viewSessions {
+		if i, ok := m.sessList.SelectedItem().(sessionItem); ok {
+			name = i.row.name
+		}
 	}
 	if m.cur != nil {
-		sel = m.cur.name
+		name = m.cur.name
 	}
 	_ = m.loadSessions()
-	if sel != "" {
-		for i := range m.sessions {
-			if m.sessions[i].name == sel {
-				m.sel = i
+	m.syncSessionList()
+	if name != "" {
+		for i, item := range m.sessList.Items() {
+			if s, ok := item.(sessionItem); ok && s.row.name == name {
+				m.sessList.Select(i)
 				if m.cur != nil {
 					m.cur = &m.sessions[i]
 					m.loadSnaps()
@@ -182,6 +207,7 @@ func (m *model) loadSnaps() {
 		r.snap, r.err = manifest.Load(p)
 		m.snaps = append(m.snaps, r)
 	}
+	m.syncSnapList()
 }
 
 func loadPlanCmd(session, snapPath string) tea.Cmd {
@@ -200,28 +226,115 @@ func loadPlanCmd(session, snapPath string) tea.Cmd {
 		}
 		resume.Settle(session, 6*time.Second)
 		pd.plan = resume.Diff(snap, live)
+		pd.sel = make([]bool, len(pd.plan.Panes))
+		for i, pp := range pd.plan.Panes {
+			pd.sel[i] = pp.Manifest.Agent != ""
+		}
 		return planMsg{pd: pd}
 	}
 }
 
-// buildRows materializes plan rows with defaults: agents selected, shells not.
-func (pd *planData) buildRows() {
-	pd.rows = nil
-	if pd.plan == nil {
-		return
+// ---- list / table sync -------------------------------------------------
+
+type sessionItem struct{ row sessionRow }
+
+func (i sessionItem) Title() string {
+	badge := styBad.Render("stopped")
+	if i.row.running {
+		badge = styOK.Render("running")
 	}
-	for _, pp := range pd.plan.Panes {
-		r := planRow{
-			pp:       pp,
-			size:     strategy.TranscriptSize(pp.Manifest.Agent, pp.Manifest.SID, pp.Manifest.Env),
-			provider: strategy.ProviderLabel(pp.Manifest.Agent, pp.Manifest.Env),
-			selected: pp.Manifest.Agent != "",
-		}
-		pd.rows = append(pd.rows, r)
+	return fmt.Sprintf("%s  %s", i.row.name, badge)
+}
+func (i sessionItem) Description() string {
+	if i.row.latest == nil {
+		return "no snapshots — press c to capture"
 	}
+	agents, size, _ := snapshotStats(i.row.latest)
+	return fmt.Sprintf("last %s · %d %s · %s transcripts · %s",
+		relTime(i.row.latest.CreatedAt.Local()), i.row.agents, plural(i.row.agents, "agent"), humanBytes(size), agents)
+}
+func (i sessionItem) FilterValue() string { return i.row.name }
+
+type snapshotItem struct {
+	row    snapshotRow
+	isLast bool
 }
 
-// ---- formatting helpers ----------------------------------------------
+func (i snapshotItem) Title() string {
+	mark := " "
+	if i.isLast {
+		mark = styOK.Render("●")
+	}
+	if i.row.err != nil || i.row.snap == nil {
+		return mark + " unreadable snapshot"
+	}
+	agents, size, n := snapshotStats(i.row.snap)
+	return fmt.Sprintf("%s %s — %d %s · %s · %s", mark, relTime(i.row.snap.CreatedAt.Local()),
+		n, plural(n, "agent"), agents, humanBytes(size))
+}
+func (i snapshotItem) Description() string { return "" }
+func (i snapshotItem) FilterValue() string {
+	return filepath.Base(i.row.path)
+}
+
+func (m *model) syncSessionList() {
+	items := make([]list.Item, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		items = append(items, sessionItem{row: s})
+	}
+	m.sessList.SetItems(items)
+}
+
+func (m *model) syncSnapList() {
+	items := make([]list.Item, 0, len(m.snaps))
+	for _, r := range m.snaps {
+		items = append(items, snapshotItem{row: r, isLast: m.cur != nil && r.path == m.cur.last})
+	}
+	m.snapList.SetItems(items)
+}
+
+var planColumns = []table.Column{
+	{Title: "sel", Width: 3},
+	{Title: "agent", Width: 14},
+	{Title: "kind → provider", Width: 20},
+	{Title: "verdict", Width: 11},
+	{Title: "disk", Width: 7},
+	{Title: "why", Width: 34},
+}
+
+func (m *model) syncTable() {
+	if m.plan == nil || m.plan.plan == nil {
+		m.tbl.SetRows([]table.Row{})
+		return
+	}
+	rows := make([]table.Row, 0, len(m.plan.plan.Panes))
+	for i, pp := range m.plan.plan.Panes {
+		box := " "
+		if m.plan.sel[i] {
+			box = "x"
+		}
+		if pp.Manifest.Agent == "" {
+			box = "·"
+		}
+		kind := pp.Manifest.Agent
+		if kind == "" {
+			kind = "shell"
+		}
+		who := kind
+		if prov := strategy.ProviderLabel(pp.Manifest.Agent, pp.Manifest.Env); prov != "" && prov != kind {
+			who = kind + " → " + prov
+		}
+		size := strategy.TranscriptSize(pp.Manifest.Agent, pp.Manifest.SID, pp.Manifest.Env)
+		reason := pp.Reason
+		if pp.Action == resume.ShellKeep {
+			reason = "shell pane"
+		}
+		rows = append(rows, table.Row{box, pp.Manifest.Key, who, string(pp.Action), humanBytes(size), reason})
+	}
+	m.tbl.SetRows(rows)
+}
+
+// ---- formatting ---------------------------------------------------------
 
 func relTime(t time.Time) string {
 	d := time.Since(t)
@@ -272,152 +385,6 @@ func snapshotStats(s *manifest.Snapshot) (agents string, size int64, n int) {
 	return agents, size, len(names)
 }
 
-// ---- views ------------------------------------------------------------
-
-func (m *model) title() string {
-	switch m.mode {
-	case viewSessions:
-		return styTitle.Render(" herdr-archive ") + styDim.Render(" sessions")
-	case viewSnapshots:
-		return styTitle.Render(" herdr-archive ") + styDim.Render(" "+m.cur.name+" › snapshots")
-	default:
-		return styTitle.Render(" herdr-archive ") + styDim.Render(" "+m.cur.name+" › restore plan")
-	}
-}
-
-// body renders the current view and returns a line map: for each rendered
-// line, the index of the selectable thing it represents (-1 = banner/plain
-// text the cursor skips).
-func (m *model) body() (lines []string, lineMap []int) {
-	add := func(s string, sel int) {
-		lines = append(lines, s)
-		lineMap = append(lineMap, sel)
-	}
-	switch m.mode {
-	case viewSessions:
-		for i, s := range m.sessions {
-			badge := styBad.Render("stopped")
-			if s.running {
-				badge = styOK.Render("running")
-			}
-			info := styDim.Render("no snapshots — press c to capture")
-			if s.latest != nil {
-				agents, size, _ := snapshotStats(s.latest)
-				info = fmt.Sprintf("%s · %s %s", styDim.Render("last "+relTime(s.latest.CreatedAt.Local())),
-					styDim.Render(fmt.Sprintf("%d %s", s.agents, plural(s.agents, "agent"))),
-					styDim.Render("· "+humanBytes(size)+" transcripts · "+agents))
-			}
-			add(fmt.Sprintf("  %-14s %-8s %s", s.name, badge, info), i)
-		}
-		return lines, lineMap
-	case viewSnapshots:
-		for i, r := range m.snaps {
-			if r.err != nil || r.snap == nil {
-				add("  "+styBad.Render("unreadable snapshot"), -1)
-				continue
-			}
-			agents, size, n := snapshotStats(r.snap)
-			mark := "  "
-			if r.path == m.cur.last {
-				mark = styOK.Render("●")
-			}
-			add(fmt.Sprintf(" %s %-10s %s %s", mark, relTime(r.snap.CreatedAt.Local()),
-				styDim.Render(fmt.Sprintf("%d %s · %s", n, plural(n, "agent"), agents)),
-				styDim.Render("· "+humanBytes(size))), i)
-		}
-		if len(m.snaps) == 0 {
-			add(styDim.Render("  no snapshots yet — press c to capture this session"), -1)
-		}
-		return lines, lineMap
-	default: // viewPlan
-		if m.plan == nil {
-			if m.err != nil {
-				add("  "+styBad.Render(m.err.Error()), -1)
-			} else {
-				add(styDim.Render("  loading diff…"), -1)
-			}
-			return lines, lineMap
-		}
-		if m.plan.plan == nil {
-			// server down: show what a restore would bring back
-			add("  "+styWarn.Render("session stopped — y will boot it and restore this snapshot"), -1)
-			agents, size, n := snapshotStats(m.plan.snap)
-			add(styDim.Render(fmt.Sprintf("  %d %s · %s · %s transcripts", n, plural(n, "agent"), agents, humanBytes(size))), -1)
-			add("", -1)
-			for i, p := range m.plan.snap.AgentPanes() {
-				prov := strategy.ProviderLabel(p.Agent, p.Env)
-				add(fmt.Sprintf("  %s %-14s %s", styOK.Render("[x]"), p.Key, styDim.Render(p.Agent+"→"+prov)), i)
-			}
-			return lines, lineMap
-		}
-		banner := styOK.Render("running") + styDim.Render(" — resume sweeps in place, live panes are kept")
-		if m.plan.running {
-			allKeep := true
-			for _, r := range m.plan.rows {
-				if r.pp.Action != resume.KeepNative && r.pp.Action != resume.ShellKeep {
-					allKeep = false
-				}
-			}
-			if allKeep {
-				banner = styOK.Render("running & healthy") + styDim.Render(" — nothing to do")
-			}
-		}
-		agents, size, n := snapshotStats(m.plan.snap)
-		add("  "+banner, -1)
-		add(styDim.Render(fmt.Sprintf("  snapshot %s · %d %s · %s · %s transcripts",
-			relTime(m.plan.snap.CreatedAt.Local()), n, plural(n, "agent"), agents, humanBytes(size))), -1)
-		add("", -1)
-		for i, r := range m.plan.rows {
-			box := "[ ]"
-			if r.selected {
-				box = styOK.Render("[x]")
-			}
-			verdict := styVerdict[string(r.pp.Action)]
-			kind := r.pp.Manifest.Agent
-			who := kind
-			if r.provider != kind && r.provider != "" {
-				who = kind + styDim.Render("→") + r.provider
-			}
-			add(fmt.Sprintf("  %s %-14s %-19s %-11s %-7s %s", box, r.pp.Manifest.Key, who,
-				verdict.Render(string(r.pp.Action)), styDim.Render(humanBytes(r.size)),
-				styDim.Render(clip(r.reason(), 30))), i)
-		}
-		return lines, lineMap
-	}
-}
-
-// selectableAt reports whether line idx carries a cursor target.
-func (m *model) selectable(idx int) bool {
-	_, lineMap := m.body()
-	return idx >= 0 && idx < len(lineMap) && lineMap[idx] >= 0
-}
-
-func (m *model) footer() string {
-	switch m.mode {
-	case viewSessions:
-		return "enter snapshots · c capture now · q quit"
-	case viewSnapshots:
-		return "enter plan · c capture now · esc back · q quit"
-	default:
-		return "space select · a all/none · y restore selected · r refresh · esc back"
-	}
-}
-
-func (r planRow) reason() string {
-	if r.pp.Action == resume.ShellKeep {
-		return "shell pane"
-	}
-	return r.pp.Reason
-}
-
-func clip(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n-1]) + "…"
-}
-
 func plural(n int, s string) string {
 	if n == 1 {
 		return s
@@ -425,261 +392,367 @@ func plural(n int, s string) string {
 	return s + "s"
 }
 
-// ---- bubble tea --------------------------------------------------------
+// preview renders the target layout: which panes get restored and which
+// stay as they are, one tree per workspace.
+func (m *model) previewLines() []string {
+	if m.plan == nil || m.plan.snap == nil {
+		return nil
+	}
+	selByKey := map[string]bool{}
+	if m.plan.plan != nil {
+		for i, pp := range m.plan.plan.Panes {
+			selByKey[pp.Manifest.Key] = m.plan.sel[i]
+		}
+	}
+	head := "  layout the restore produces (▣ = restored with env replay, · = left as-is/native)"
+	var out []string
+	for _, w := range m.plan.snap.Workspaces {
+		out = append(out, fmt.Sprintf("  %s  %s", styTitle.Render(w.ID), w.Label))
+		for ti, t := range w.Tabs {
+			branch := "├─"
+			if ti == len(w.Tabs)-1 {
+				branch = "└─"
+			}
+			tabName := t.Label
+			if tabName == "" {
+				tabName = t.ID
+			}
+			out = append(out, fmt.Sprintf("  %s %s", branch, styDim.Render(tabName)))
+			for pi, p := range t.Panes {
+				pb := "│  "
+				if ti == len(w.Tabs)-1 {
+					pb = "   "
+				}
+				pbranch := "├─"
+				if pi == len(t.Panes)-1 {
+					pbranch = "└─"
+				}
+				glyph, act := "·", styDim.Render("in place")
+				if selByKey[p.Key] {
+					glyph, act = "▣", styOK.Render("env-replay restore")
+				} else if p.Agent == "" {
+					glyph, act = "□", styDim.Render("shell at cwd")
+				}
+				prov := strategy.ProviderLabel(p.Agent, p.Env)
+				kind := p.Agent
+				if kind == "" {
+					kind = "shell"
+				}
+				who := kind
+				if prov != "" && prov != kind {
+					who = kind + "→" + prov
+				}
+				out = append(out, fmt.Sprintf("  %s   %s %-14s %-18s %s", pb, glyph, pbranch+" "+p.Key, who, act))
+			}
+		}
+	}
+	return append([]string{head}, out...)
+}
+
+// ---- chrome -------------------------------------------------------------
+
+func (m *model) title() string {
+	switch m.mode {
+	case viewSessions:
+		return styTitle.Render("herdr-archive") + styDim.Render("  sessions")
+	case viewSnapshots:
+		return styTitle.Render("herdr-archive") + styDim.Render("  "+m.cur.name+" › snapshots  (● last)")
+	default:
+		return styTitle.Render("herdr-archive") + styDim.Render("  "+m.cur.name+" › restore plan")
+	}
+}
+
+func (m *model) banner() string {
+	if m.mode != viewPlan {
+		return ""
+	}
+	if m.plan == nil {
+		if m.err != nil {
+			return styBad.Render(m.err.Error())
+		}
+		return m.spin.View() + styDim.Render(" diffing live session…")
+	}
+	if m.plan.plan == nil {
+		return styWarn.Render("session stopped (" + m.plan.planErr + ") — y boots it and restores this snapshot")
+	}
+	banner := styOK.Render("running") + styDim.Render(" — restore sweeps in place, live panes are kept")
+	allKeep := true
+	for i, pp := range m.plan.plan.Panes {
+		if m.plan.sel[i] && pp.Action != resume.KeepNative && pp.Action != resume.ShellKeep {
+			allKeep = false
+		}
+	}
+	if allKeep {
+		banner = styOK.Render("running & healthy") + styDim.Render(" — nothing to do")
+	}
+	return banner
+}
+
+func (m *model) footer() string {
+	switch m.mode {
+	case viewSessions:
+		return "enter snapshots · c capture · / filter · q quit"
+	case viewSnapshots:
+		return "enter plan · c capture · esc back · q quit"
+	default:
+		if m.preview {
+			return "p table · space select · y restore selected · esc back"
+		}
+		return "space select · a all/none · p layout preview · y restore selected · r refresh · esc back"
+	}
+}
+
+func (m *model) View() string {
+	var b strings.Builder
+	b.WriteString(m.title())
+	b.WriteString("\n")
+	if ban := m.banner(); ban != "" {
+		b.WriteString(ban)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+	switch m.mode {
+	case viewSessions:
+		b.WriteString(m.sessList.View())
+	case viewSnapshots:
+		b.WriteString(m.snapList.View())
+	default:
+		if m.preview {
+			for _, l := range m.previewLines() {
+				b.WriteString(l)
+				b.WriteString("\n")
+			}
+		} else if m.plan != nil && m.plan.plan != nil {
+			b.WriteString(m.tbl.View())
+		} else if m.plan != nil && m.plan.plan == nil {
+			agents, size, n := snapshotStats(m.plan.snap)
+			b.WriteString(styDim.Render(fmt.Sprintf("%d %s · %s · %s transcripts", n, plural(n, "agent"), agents, humanBytes(size))))
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("\n")
+	if m.note != "" {
+		b.WriteString(styWarn.Render(m.note))
+		b.WriteString("\n")
+	}
+	b.WriteString(styDim.Render(m.footer()))
+	return b.String()
+}
+
+// ---- update -------------------------------------------------------------
 
 func (m *model) Init() tea.Cmd { return nil }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c":
-			return m, tea.Quit
-		case "q":
-			if m.mode == viewPlan {
-				m.mode, m.plan, m.sel, m.scroll = viewSnapshots, nil, 0, 0
-				return m, nil
-			}
-			if m.mode == viewSnapshots {
-				m.mode, m.cur, m.sel, m.scroll = viewSessions, nil, 0, 0
-				return m, nil
-			}
-			return m, tea.Quit
-		case "esc":
-			if m.mode == viewPlan {
-				m.mode, m.plan, m.sel, m.scroll = viewSnapshots, nil, 0, 0
-			} else if m.mode == viewSnapshots {
-				m.mode, m.cur, m.sel, m.scroll = viewSessions, nil, 0, 0
-			} else {
-				return m, tea.Quit
-			}
-			return m, nil
-		case "up", "k":
-			for m.sel > 0 {
-				m.sel--
-				if m.selectable(m.sel) {
-					break
-				}
-			}
-			m.fixScroll()
-		case "down", "j":
-			_, lineMap := m.body()
-			for m.sel < len(lineMap)-1 {
-				m.sel++
-				if m.selectable(m.sel) {
-					break
-				}
-			}
-			m.fixScroll()
-		case "enter":
-			switch m.mode {
-			case viewSessions:
-				if len(m.sessions) == 0 || !m.selectable(m.sel) {
-					return m, nil
-				}
-				m.cur = &m.sessions[m.sel]
-				m.loadSnaps()
-				m.mode, m.sel, m.scroll = viewSnapshots, 0, 0
-			case viewSnapshots:
-				_, lineMap := m.body()
-				if !m.selectable(m.sel) {
-					return m, nil
-				}
-				m.curSnap = m.snaps[lineMap[m.sel]].path
-				m.mode, m.sel, m.scroll, m.plan = viewPlan, 0, 0, nil
-				return m, loadPlanCmd(m.cur.name, m.curSnap)
-			}
-		case "space", " ":
-			if m.mode == viewPlan && m.plan != nil && m.plan.plan != nil {
-				_, lineMap := m.body()
-				if !m.selectable(m.sel) {
-					return m, nil
-				}
-				row := &m.plan.rows[lineMap[m.sel]]
-				if row.pp.Manifest.Agent != "" {
-					row.selected = !row.selected
-				}
-			}
-		case "a":
-			if m.mode == viewPlan && m.plan != nil && m.plan.plan != nil {
-				allSel := true
-				for _, r := range m.plan.rows {
-					if r.pp.Manifest.Agent != "" && !r.selected {
-						allSel = false
-					}
-				}
-				for i := range m.plan.rows {
-					if m.plan.rows[i].pp.Manifest.Agent != "" {
-						m.plan.rows[i].selected = !allSel
-					}
-				}
-			}
-		case "y":
-			if m.mode == viewPlan && m.plan != nil && m.plan.snap != nil {
-				var agents []string
-				total := 0
-				for _, r := range m.plan.rows {
-					if r.pp.Manifest.Agent != "" {
-						total++
-						if r.selected {
-							agents = append(agents, r.pp.Manifest.Key)
-						}
-					}
-				}
-				if len(agents) == 0 {
-					m.note = "select at least one agent (space)"
-					return m, nil
-				}
-				self, err := os.Executable()
-				if err != nil {
-					m.note = err.Error()
-					return m, nil
-				}
-				args := []string{"resume", "--session", m.cur.name, "--from", m.plan.path, "--yes"}
-				if len(agents) < total {
-					for _, a := range agents {
-						args = append(args, "--agent", a)
-					}
-				}
-				m.note = "restore: " + strings.Join(agents, ", ")
-				cmd := exec.Command(self, args...)
-				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-					_ = err
-					return refreshedMsg{}
-				})
-			}
-		case "c":
-			if m.mode == viewSessions || m.mode == viewSnapshots {
-				name := ""
-				if m.mode == viewSessions && m.sel < len(m.sessions) {
-					name = m.sessions[m.sel].name
-				}
-				if m.mode == viewSnapshots && m.cur != nil {
-					name = m.cur.name
-				}
-				if name == "" {
-					return m, nil
-				}
-				self, _ := os.Executable()
-				m.note = "capture: " + name
-				cmd := exec.Command(self, "capture", "--session", name)
-				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-					_ = err
-					return refreshedMsg{}
-				})
-			}
-		case "r":
-			if m.mode == viewPlan && m.plan != nil {
-				m.plan = nil
-				return m, loadPlanCmd(m.cur.name, m.curSnap)
-			}
-			if m.mode == viewSessions {
-				m.refreshSessions()
-			}
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+		w, h := msg.Width-4, msg.Height-8
+		m.sessList.SetSize(w, h)
+		m.snapList.SetSize(w, h)
+		m.tbl.SetWidth(w)
+		m.tbl.SetHeight(h)
+		return m, nil
+	case spinner.TickMsg:
+		if m.spinning {
+			var cmd tea.Cmd
+			m.spin, cmd = m.spin.Update(msg)
+			return m, cmd
 		}
+		return m, nil
 	case planMsg:
-		m.plan, m.err = msg.pd, msg.err
-		if m.plan != nil {
-			m.plan.buildRows()
-		}
+		m.spinning, m.plan, m.err = false, msg.pd, msg.err
+		m.tbl.SetRows([]table.Row{})
+		m.syncTable()
+		m.tbl.SetHeight(m.height - 10)
+		return m, nil
 	case refreshedMsg:
 		m.refreshSessions()
 		if m.mode == viewPlan && m.plan != nil {
-			return m, loadPlanCmd(m.cur.name, m.curSnap)
+			m.spinning = true
+			return m, tea.Batch(loadPlanCmd(m.cur.name, m.curSnap), m.spin.Tick)
+		}
+		return m, nil
+	case tea.KeyMsg:
+		return m.key(msg)
+	}
+	var cmd tea.Cmd
+	switch m.mode {
+	case viewSessions:
+		m.sessList, cmd = m.sessList.Update(msg)
+	case viewSnapshots:
+		m.snapList, cmd = m.snapList.Update(msg)
+	case viewPlan:
+		if !m.preview && m.plan != nil && m.plan.plan != nil {
+			m.tbl, cmd = m.tbl.Update(msg)
 		}
 	}
-	return m, nil
+	return m, cmd
 }
 
-func (m *model) fixScroll() {
-	if m.sel < m.scroll {
-		m.scroll = m.sel
-	}
-	if m.sel >= m.scroll+rowsShown {
-		m.scroll = m.sel - rowsShown + 1
-	}
-}
-
-func (m *model) View() string {
-	lines, _ := m.body()
-	start, end := 0, len(lines)
-	if end > rowsShown {
-		start, end = m.scroll, m.scroll+rowsShown
-		if m.sel < start || m.sel >= end {
-			start = m.sel
-			end = start + rowsShown
+func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "q":
+		if m.mode == viewPlan {
+			m.mode, m.plan, m.preview = viewSnapshots, nil, false
+			return m, nil
 		}
-	}
-	var b strings.Builder
-	b.WriteString(m.title())
-	b.WriteString("\n")
-	b.WriteString(styDim.Render(strings.Repeat("─", 72)))
-	b.WriteString("\n")
-	for i, line := range lines[start:end] {
-		idx := start + i
-		text := clipANSI(line, 96)
-		if idx == m.sel {
-			b.WriteString(stySel.Render(pad(text, 98)))
+		if m.mode == viewSnapshots {
+			m.mode, m.cur = viewSessions, nil
+			return m, nil
+		}
+		return m, tea.Quit
+	case "esc":
+		if m.mode == viewPlan {
+			if m.preview {
+				m.preview = false
+				return m, nil
+			}
+			m.mode, m.plan = viewSnapshots, nil
+		} else if m.mode == viewSnapshots {
+			m.mode, m.cur = viewSessions, nil
 		} else {
-			b.WriteString(text)
+			return m, tea.Quit
 		}
-		b.WriteString("\n")
+		return m, nil
+	case "enter":
+		switch m.mode {
+		case viewSessions:
+			item, ok := m.sessList.SelectedItem().(sessionItem)
+			if !ok {
+				return m, nil
+			}
+			for i := range m.sessions {
+				if m.sessions[i].name == item.row.name {
+					m.cur = &m.sessions[i]
+					break
+				}
+			}
+			m.loadSnaps()
+			m.mode = viewSnapshots
+			return m, nil
+		case viewSnapshots:
+			item, ok := m.snapList.SelectedItem().(snapshotItem)
+			if !ok || item.row.err != nil {
+				return m, nil
+			}
+			m.curSnap = item.row.path
+			m.mode, m.plan, m.preview, m.spinning = viewPlan, nil, false, true
+			m.tbl.SetRows([]table.Row{})
+			return m, tea.Batch(loadPlanCmd(m.cur.name, m.curSnap), m.spin.Tick)
+		}
+	case " ":
+		if m.mode == viewPlan && !m.preview && m.plan != nil && m.plan.plan != nil {
+			i := m.tbl.Cursor()
+			if i < len(m.plan.sel) && m.plan.plan.Panes[i].Manifest.Agent != "" {
+				m.plan.sel[i] = !m.plan.sel[i]
+				m.syncTable()
+			}
+		}
+	case "a":
+		if m.mode == viewPlan && m.plan != nil && m.plan.plan != nil {
+			all := true
+			for i, pp := range m.plan.plan.Panes {
+				if pp.Manifest.Agent != "" && !m.plan.sel[i] {
+					all = false
+				}
+			}
+			for i, pp := range m.plan.plan.Panes {
+				if pp.Manifest.Agent != "" {
+					m.plan.sel[i] = !all
+				}
+			}
+			m.syncTable()
+		}
+	case "p":
+		if m.mode == viewPlan && m.plan != nil {
+			m.preview = !m.preview
+		}
+	case "y":
+		if m.mode == viewPlan && m.plan != nil && m.plan.snap != nil {
+			return m.execRestore()
+		}
+	case "c":
+		name := ""
+		if m.mode == viewSessions {
+			if item, ok := m.sessList.SelectedItem().(sessionItem); ok {
+				name = item.row.name
+			}
+		} else if m.mode == viewSnapshots && m.cur != nil {
+			name = m.cur.name
+		}
+		if name == "" {
+			return m, nil
+		}
+		self, _ := os.Executable()
+		m.note = "capture: " + name
+		return m, tea.ExecProcess(exec.Command(self, "capture", "--session", name), func(err error) tea.Msg {
+			return refreshedMsg{}
+		})
+	case "r":
+		if m.mode == viewPlan && m.plan != nil {
+			m.plan, m.spinning, m.preview = nil, true, false
+			return m, tea.Batch(loadPlanCmd(m.cur.name, m.curSnap), m.spin.Tick)
+		}
+		if m.mode == viewSessions {
+			m.refreshSessions()
+		}
+		return m, nil
 	}
-	b.WriteString(styDim.Render(strings.Repeat("─", 72)))
-	b.WriteString("\n")
-	if m.note != "" {
-		b.WriteString(styWarn.Render(clipANSI(m.note, 72)) + "\n")
+	// everything else (arrows, j/k, filtering, paging) belongs to the
+	// active bubbles component
+	var cmd tea.Cmd
+	switch m.mode {
+	case viewSessions:
+		m.sessList, cmd = m.sessList.Update(msg)
+	case viewSnapshots:
+		m.snapList, cmd = m.snapList.Update(msg)
+	case viewPlan:
+		if !m.preview && m.plan != nil && m.plan.plan != nil {
+			m.tbl, cmd = m.tbl.Update(msg)
+		}
 	}
-	b.WriteString(styDim.Render(" " + m.footer()))
-	return styFrame.Render(b.String())
+	return m, cmd
 }
 
-// clipANSI trims a styled line to n visible cells without breaking escapes.
-func clipANSI(s string, n int) string {
-	var b strings.Builder
-	cells := 0
-	inEsc := false
-	for _, r := range s {
-		if r == '\x1b' {
-			inEsc = true
-			b.WriteRune(r)
-			continue
-		}
-		if inEsc {
-			b.WriteRune(r)
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-				inEsc = false
+func (m *model) execRestore() (tea.Model, tea.Cmd) {
+	var agents []string
+	total := 0
+	if m.plan.plan != nil {
+		for i, pp := range m.plan.plan.Panes {
+			if pp.Manifest.Agent != "" {
+				total++
+				if m.plan.sel[i] {
+					agents = append(agents, pp.Manifest.Key)
+				}
 			}
-			continue
 		}
-		if cells >= n {
-			return b.String()
+	} else {
+		// server down: restore everything the snapshot holds
+		for _, p := range m.plan.snap.AgentPanes() {
+			agents = append(agents, p.Key)
 		}
-		cells++
-		b.WriteRune(r)
+		total = len(agents)
 	}
-	return b.String()
-}
-
-// pad pads a styled line to n visible cells for full-row highlight.
-func pad(s string, n int) string {
-	cells := 0
-	inEsc := false
-	for _, r := range s {
-		if r == '\x1b' {
-			inEsc = true
-			continue
-		}
-		if inEsc {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-				inEsc = false
-			}
-			continue
-		}
-		cells++
+	if len(agents) == 0 {
+		m.note = "select at least one agent (space)"
+		return m, nil
 	}
-	if cells >= n {
-		return s
+	self, err := os.Executable()
+	if err != nil {
+		m.note = err.Error()
+		return m, nil
 	}
-	return s + strings.Repeat(" ", n-cells)
+	args := []string{"resume", "--session", m.cur.name, "--from", m.plan.path, "--yes"}
+	if m.plan.plan != nil && len(agents) < total {
+		for _, a := range agents {
+			args = append(args, "--agent", a)
+		}
+	}
+	m.note = "restore: " + strings.Join(agents, ", ")
+	return m, tea.ExecProcess(exec.Command(self, args...), func(err error) tea.Msg {
+		return refreshedMsg{}
+	})
 }

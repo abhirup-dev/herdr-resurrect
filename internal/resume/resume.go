@@ -333,10 +333,27 @@ func launchPane(session, anchor string, pp PanePlan, relaunch string) (string, e
 		return np, fmt.Errorf("agent not detected in %s within 45s", np)
 	}
 	// Re-attach the captured name: identity must survive the swap so herdr
-	// UX and future diffs match the pane by name again.
+	// UX and future diffs match the pane by name again. If the name is
+	// taken (e.g. unparking into a session that still holds it), auto-
+	// resolve with a numeric suffix rather than failing the restore.
 	if pp.Manifest.Name != "" {
-		if _, err := herdr.Run(append(scope, "agent", "rename", np, pp.Manifest.Name)...); err != nil {
-			return np, fmt.Errorf("rename: %w", err)
+		name := pp.Manifest.Name
+		for attempt := 0; ; attempt++ {
+			candidate := name
+			if attempt > 0 {
+				// agent names are [a-z][a-z0-9_-]{0,31}: dots are illegal
+				candidate = fmt.Sprintf("%s-%d", name, attempt)
+			}
+			_, err := herdr.Run(append(scope, "agent", "rename", np, candidate)...)
+			if err == nil {
+				if candidate != name {
+					fmt.Printf("  !            %s: name taken, restored as %s\n", name, candidate)
+				}
+				break
+			}
+			if attempt >= 5 {
+				return np, fmt.Errorf("rename: %w", err)
+			}
 		}
 	}
 	return np, nil
