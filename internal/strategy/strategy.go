@@ -146,3 +146,76 @@ func Describe(argv []string) string {
 	}
 	return fmt.Sprintf("%s…", strings.Join(argv[:min(3, len(argv))], " "))
 }
+
+// ProviderLabel derives a short human label ("z.ai", "local proxy",
+// "anthropic") from a captured env block — the base URL the agent actually
+// talked to, not any launcher knowledge.
+func ProviderLabel(kind string, env map[string]string) string {
+	// kind-specific only for known kinds: a codex pane inherits the user's
+	// shell vars (ANTHROPIC_*, KCLAUDE_*…) but only its own base URL
+	// describes it. Unknown kinds fall back to any provider-looking var.
+	var keys []string
+	switch kind {
+	case "claude", "grok":
+		keys = []string{"ANTHROPIC_BASE_URL"}
+	case "codex":
+		keys = []string{"OPENAI_BASE_URL", "OPENAI_API_BASE"}
+	default:
+		keys = []string{"ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "KCLAUDE_BASE_URL", "DEEPC_BASE_URL", "ZAI_BASE_URL"}
+	}
+	for _, k := range keys {
+		if u := env[k]; u != "" {
+			host := u
+			if i := strings.Index(host, "://"); i >= 0 {
+				host = host[i+3:]
+			}
+			if i := strings.IndexByte(host, '/'); i >= 0 {
+				host = host[:i]
+			}
+			switch {
+			case strings.HasPrefix(host, "127.0.0.1"), caseLocal(host):
+				return "local proxy"
+			case strings.Contains(host, "z.ai"):
+				return "z.ai"
+			case strings.Contains(host, "anthropic.com"):
+				return "anthropic"
+			default:
+				return host
+			}
+		}
+	}
+	return kind
+}
+
+func caseLocal(h string) bool { return strings.HasPrefix(h, "localhost") }
+
+// TranscriptSize returns the on-disk size of an agent's native transcript,
+// so snapshots can show what a restore actually carries back.
+func TranscriptSize(kind, sid string, env map[string]string) int64 {
+	if sid == "" {
+		return 0
+	}
+	home, _ := os.UserHomeDir()
+	var matches []string
+	switch kind {
+	case "claude", "grok":
+		cfg := env["CLAUDE_CONFIG_DIR"]
+		if cfg == "" {
+			cfg = filepath.Join(home, ".claude")
+		}
+		matches, _ = filepath.Glob(filepath.Join(cfg, "projects", "*", sid+".jsonl"))
+	case "codex":
+		matches, _ = filepath.Glob(filepath.Join(home, ".codex", "sessions", "*", "*", "*", "*"+sid+"*"))
+	case "pi":
+		if fi, err := os.Stat(sid); err == nil {
+			return fi.Size()
+		}
+	}
+	var total int64
+	for _, m := range matches {
+		if fi, err := os.Stat(m); err == nil {
+			total += fi.Size()
+		}
+	}
+	return total
+}

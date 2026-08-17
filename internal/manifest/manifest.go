@@ -143,8 +143,20 @@ func (s *Snapshot) AgentPanes() []Pane {
 }
 
 // Filter returns the sub-snapshot matching the selectors. Empty selectors
-// keep everything. This is the partial-resume subset.
-func (s *Snapshot) Filter(wsID, tabID, agentKey string) *Snapshot {
+// keep everything. This is the partial-resume subset; agents is a repeatable
+// allow-list of keys/names/pane-ids.
+func (s *Snapshot) Filter(wsID, tabID string, agents []string) *Snapshot {
+	want := func(p Pane) bool {
+		if len(agents) == 0 {
+			return true
+		}
+		for _, a := range agents {
+			if p.Key == a || p.Name == a || p.PaneID == a {
+				return true
+			}
+		}
+		return false
+	}
 	out := &Snapshot{Version: s.Version, CreatedAt: s.CreatedAt, Session: s.Session, SessionDir: s.SessionDir}
 	for _, w := range s.Workspaces {
 		if wsID != "" && w.ID != wsID && w.Label != wsID {
@@ -157,10 +169,9 @@ func (s *Snapshot) Filter(wsID, tabID, agentKey string) *Snapshot {
 			}
 			mt := Tab{ID: t.ID, Label: t.Label}
 			for _, p := range t.Panes {
-				if agentKey != "" && p.Key != agentKey && p.Name != agentKey && p.PaneID != agentKey {
-					continue
+				if want(p) {
+					mt.Panes = append(mt.Panes, p)
 				}
-				mt.Panes = append(mt.Panes, p)
 			}
 			if len(mt.Panes) > 0 {
 				mw.Tabs = append(mw.Tabs, mt)

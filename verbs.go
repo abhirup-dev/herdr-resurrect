@@ -107,7 +107,8 @@ func cmdResume(args []string) int {
 	yes := fs.Bool("yes", false, "apply the plan (default: dry-run)")
 	wsSel := fs.String("workspace", "", "partial: only this workspace (id or label)")
 	tabSel := fs.String("tab", "", "partial: only this tab (id or label)")
-	agentSel := fs.String("agent", "", "partial: only this agent (name or key)")
+	var agentSel stringsArg
+	fs.Var(&agentSel, "agent", "partial: only this agent (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -126,7 +127,7 @@ func cmdResume(args []string) int {
 		fmt.Fprintf(os.Stderr, "resume: %v\n", err)
 		return 1
 	}
-	snap := full.Filter(*wsSel, *tabSel, *agentSel)
+	snap := full.Filter(*wsSel, *tabSel, agentSel)
 	if len(snap.Workspaces) == 0 {
 		fmt.Fprintln(os.Stderr, "resume: selectors matched nothing")
 		return 1
@@ -221,7 +222,8 @@ func cmdUnpark(args []string) int {
 	yes := fs.Bool("yes", false, "actually recreate (default: dry-run)")
 	wsSel := fs.String("workspace", "", "only this workspace (id or label)")
 	tabSel := fs.String("tab", "", "only this tab (id or label)")
-	agentSel := fs.String("agent", "", "only this agent (name or key)")
+	var agentSel stringsArg
+	fs.Var(&agentSel, "agent", "only this agent (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -239,7 +241,7 @@ func cmdUnpark(args []string) int {
 		fmt.Fprintf(os.Stderr, "unpark: %v\n", err)
 		return 1
 	}
-	snap := full.Filter(*wsSel, *tabSel, *agentSel)
+	snap := full.Filter(*wsSel, *tabSel, agentSel)
 	if len(snap.Workspaces) == 0 {
 		fmt.Fprintln(os.Stderr, "unpark: selectors matched nothing")
 		return 1
