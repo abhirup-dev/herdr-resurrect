@@ -245,6 +245,25 @@ func psEnv(pid int) (map[string]string, error) {
 // SessionInfo is the exported session-listing row.
 type SessionInfo sessionEntry
 
+// LiveAgents returns the names of agents currently alive in a session, so
+// callers can tell a "running" session whose fleet died (stale) from a
+// faithful one.
+func LiveAgents(session string) ([]string, error) {
+	var list struct {
+		Agents []agentEntry `json:"agents"`
+	}
+	if err := herdr.RunInto(&list, append(herdr.SessionScope(session), "agent", "list")...); err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, a := range list.Agents {
+		if a.Name != "" {
+			names = append(names, a.Name)
+		}
+	}
+	return names, nil
+}
+
 // Sessions lists every herdr session on the machine.
 func Sessions() ([]SessionInfo, error) {
 	var list struct {

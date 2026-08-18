@@ -57,6 +57,11 @@ type sessionRow struct {
 	last    string
 	latest  *manifest.Snapshot
 	agents  int
+
+	// staleness, computed against the live session: how many agents the
+	// latest snapshot names are still alive (liveAgents == -1 = unknown,
+	// e.g. the query failed or the session has no snapshot).
+	liveAgents int
 }
 
 type snapshotRow struct {
@@ -188,7 +193,7 @@ func (m *model) loadSessions() error {
 	}
 	m.sessions = nil
 	for i := range sess {
-		row := sessionRow{name: sess[i].Name, running: sess[i].Running}
+		row := sessionRow{name: sess[i].Name, running: sess[i].Running, liveAgents: -1}
 		dir := manifest.Dir("", row.name)
 		row.last, _ = filepath.EvalSymlinks(filepath.Join(dir, "last"))
 		matches, _ := filepath.Glob(filepath.Join(dir, "herdr_*.json"))
@@ -197,6 +202,22 @@ func (m *model) loadSessions() error {
 		if len(matches) > 0 {
 			if snap, err := manifest.Load(matches[0]); err == nil {
 				row.latest, row.agents = snap, len(snap.AgentPanes())
+			}
+		}
+		if row.running && row.latest != nil {
+			if live, err := capture.LiveAgents(row.name); err == nil {
+				row.liveAgents = 0
+				for _, p := range row.latest.AgentPanes() {
+					if p.Name == "" {
+						continue
+					}
+					for _, l := range live {
+						if l == p.Name {
+							row.liveAgents++
+							break
+						}
+					}
+				}
 			}
 		}
 		m.sessions = append(m.sessions, row)
@@ -273,7 +294,10 @@ type sessionItem struct{ row sessionRow }
 
 func (i sessionItem) Title() string {
 	badge := styBad.Render("stopped")
-	if i.row.running {
+	switch {
+	case i.row.stale():
+		badge = styOK.Render("running") + styWarn.Render("/stale")
+	case i.row.running:
 		badge = styOK.Render("running")
 	}
 	return fmt.Sprintf("%s  %s", i.row.name, badge)
@@ -283,8 +307,17 @@ func (i sessionItem) Description() string {
 		return "no snapshots — press c to capture"
 	}
 	_, size, _ := snapshotStats(i.row.latest)
-	return fmt.Sprintf("last %s · %d %s · %s transcripts · %s",
+	desc := fmt.Sprintf("last %s · %d %s · %s transcripts · %s",
 		relTime(i.row.latest.CreatedAt.Local()), i.row.agents, plural(i.row.agents, "agent"), humanBytes(size), agentRoster(i.row.latest))
+	if i.row.liveAgents >= 0 && i.row.liveAgents < i.row.agents {
+		desc += styWarn.Render(fmt.Sprintf(" · %d/%d agents live", i.row.liveAgents, i.row.agents))
+	}
+	return desc
+}
+
+// stale: the server is up but captured agents have been closed.
+func (r *sessionRow) stale() bool {
+	return r.running && r.liveAgents >= 0 && r.liveAgents < r.agents
 }
 func (i sessionItem) FilterValue() string { return i.row.name }
 
