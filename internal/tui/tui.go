@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/table"
@@ -128,6 +129,14 @@ func Run() error {
 			Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(lipgloss.Color("6")),
 		}),
 	)
+	// vim keys on the table (bubbles v2 binds only arrows there; lists do
+	// bind j/k)
+	km := table.DefaultKeyMap()
+	km.LineUp = key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("k", "up"))
+	km.LineDown = key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("j", "down"))
+	m.tbl.KeyMap = km
+	// v2 table ignores keys until focused (lists have no focus gate)
+	m.tbl.Focus()
 	m.syncSessionList()
 	m.printLogoStrip()
 	_, err := tea.NewProgram(m).Run()
@@ -584,14 +593,14 @@ func (m *model) banner() string {
 func (m *model) footer() string {
 	switch m.mode {
 	case viewSessions:
-		return "enter snapshots · c capture · / filter · q quit"
+		return "enter/l open · j/k move · c capture · / filter · q quit"
 	case viewSnapshots:
-		return "enter plan · c capture · esc back · q quit"
+		return "enter/l plan · j/k move · c capture · h back · q quit"
 	default:
 		if m.preview {
-			return "p table · space select · y restore selected · esc back"
+			return "h/p table · y restore selected · h back"
 		}
-		return "space select · a all/none · p layout preview · y restore selected · r refresh · esc back"
+		return "space select · a all/none · j/k move · p/l preview · y restore · h back · r refresh"
 	}
 }
 
@@ -650,6 +659,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessList.SetSize(w, h)
 		m.snapList.SetSize(w, h)
 		m.tbl.SetWidth(w)
+		if h < 4 {
+			h = 4 // short panes: keep table rows visible, clip instead
+		}
 		m.tbl.SetHeight(h)
 		return m, nil
 	case spinner.TickMsg:
@@ -663,7 +675,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinning, m.plan, m.err = false, msg.pd, msg.err
 		m.tbl.SetRows([]table.Row{})
 		m.syncTable()
-		m.tbl.SetHeight(m.height - 10)
+		th := m.height - 10
+		if th < 4 {
+			th = 4
+		}
+		m.tbl.SetHeight(th)
+		if m.tbl.Cursor() < 0 {
+			m.tbl.SetCursor(0) // land the cursor on the first row
+		}
 		return m, nil
 	case refreshedMsg:
 		m.refreshSessions()
@@ -716,36 +735,15 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		return m, nil
-	case "enter":
-		switch m.mode {
-		case viewSessions:
-			item, ok := m.sessList.SelectedItem().(sessionItem)
-			if !ok {
-				return m, nil
-			}
-			for i := range m.sessions {
-				if m.sessions[i].name == item.row.name {
-					m.cur = &m.sessions[i]
-					break
-				}
-			}
-			m.loadSnaps()
-			m.mode = viewSnapshots
-			return m, nil
-		case viewSnapshots:
-			item, ok := m.snapList.SelectedItem().(snapshotItem)
-			if !ok || item.row.err != nil {
-				return m, nil
-			}
-			m.curSnap = item.row.path
-			m.mode, m.plan, m.preview, m.spinning = viewPlan, nil, false, true
-			m.tbl.SetRows([]table.Row{})
-			return m, tea.Batch(loadPlanCmd(m.cur.name, m.curSnap), m.spin.Tick)
-		}
-	case " ":
+	case "enter", "l":
+		return m.digIn()
+	case "h":
+		return m.back()
+	case "space", " ":
 		if m.mode == viewPlan && !m.preview && m.plan != nil && m.plan.plan != nil {
 			i := m.tbl.Cursor()
-			if i < len(m.plan.sel) && m.plan.plan.Panes[i].Manifest.Agent != "" {
+			// v2 tables report -1 before the cursor lands on a row
+			if i >= 0 && i < len(m.plan.sel) && m.plan.plan.Panes[i].Manifest.Agent != "" {
 				m.plan.sel[i] = !m.plan.sel[i]
 				m.syncTable()
 			}
@@ -814,6 +812,55 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, cmd
+}
+
+// digIn is enter/l: go one level deeper.
+func (m *model) digIn() (tea.Model, tea.Cmd) {
+	switch m.mode {
+	case viewSessions:
+		item, ok := m.sessList.SelectedItem().(sessionItem)
+		if !ok {
+			return m, nil
+		}
+		for i := range m.sessions {
+			if m.sessions[i].name == item.row.name {
+				m.cur = &m.sessions[i]
+				break
+			}
+		}
+		m.loadSnaps()
+		m.mode = viewSnapshots
+		return m, nil
+	case viewSnapshots:
+		item, ok := m.snapList.SelectedItem().(snapshotItem)
+		if !ok || item.row.err != nil {
+			return m, nil
+		}
+		m.curSnap = item.row.path
+		m.mode, m.plan, m.preview, m.spinning = viewPlan, nil, false, true
+		m.tbl.SetRows([]table.Row{})
+		return m, tea.Batch(loadPlanCmd(m.cur.name, m.curSnap), m.spin.Tick)
+	default: // viewPlan: l digs into the layout preview
+		if m.plan != nil {
+			m.preview = true
+		}
+		return m, nil
+	}
+}
+
+// back is h: one level out. h at the top level does nothing (q quits).
+func (m *model) back() (tea.Model, tea.Cmd) {
+	switch m.mode {
+	case viewPlan:
+		if m.preview {
+			m.preview = false
+			return m, nil
+		}
+		m.mode, m.plan = viewSnapshots, nil
+	case viewSnapshots:
+		m.mode, m.cur = viewSessions, nil
+	}
+	return m, nil
 }
 
 func (m *model) execRestore() (tea.Model, tea.Cmd) {
