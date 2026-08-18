@@ -90,8 +90,23 @@ herdr plugin pane open --plugin herdr-archive --entrypoint browser
 ```
 
 Sessions → snapshots (`●` = `last`) → live diff plan (async, settle-aware).
-`y` runs `resume --yes` full-screen via `tea.ExecProcess` and re-diffs after.
-Bubble Tea + Lip Gloss, no other deps.
+`y` runs `resume --yes` full-screen via `tea.ExecProcess` and re-diffs
+after. `p` toggles a layout preview of what a restore produces. Built on
+charm.land v2 (bubbletea v2, lipgloss v2, bubbles v2: list/table/spinner).
+
+### Brand images
+
+On kitty-graphics terminals (Ghostty, kitty) `browse` prints a strip of
+real brand favicons above the UI — fetched once from public favicon
+endpoints, cached at `~/.config/herdr-archive/icons/`. Kinds without a
+fetchable mark (pi) and non-graphics terminals fall back to the colored
+glyphs (✳ ∞ π ✕ …).
+
+Known limitation: kitty's unicode-placeholder scheme (U+10EEEE in the
+frame) is the only way to pin images inside a bubbletea frame, and
+bubbletea v2.0.8's cellbuf silently drops that rune (verified with
+tools/puaprobe under a pty). Hence the strip is plain pre-TUI output and
+the TUI runs inline instead of alt-screen. Worth an upstream issue.
 
 ## Plugin
 
@@ -104,6 +119,7 @@ plugin command.
 
 - `archive-all` (iterate sessions; the loop is trivial, policy is not)
 - `status` verb (resume dry-run covers the audit for now)
+- Sixel/iTerm image paths (kitty only for now; rasterm is already a dep)
 - Linux (`/proc/<pid>/environ` instead of `ps Ewww`)
 - Env values with spaces: `ps` tokenizes unquoted; provider vars in
   practice don't contain spaces

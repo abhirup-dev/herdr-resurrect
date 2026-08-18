@@ -18,7 +18,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/abhirupdas/herdr-archive/internal/brands"
 	"github.com/abhirupdas/herdr-archive/internal/capture"
+	"github.com/abhirupdas/herdr-archive/internal/kitty"
 	"github.com/abhirupdas/herdr-archive/internal/manifest"
 	"github.com/abhirupdas/herdr-archive/internal/resume"
 	"github.com/abhirupdas/herdr-archive/internal/strategy"
@@ -122,8 +124,39 @@ func Run() error {
 		}),
 	)
 	m.syncSessionList()
+	m.printLogoStrip()
 	_, err := tea.NewProgram(m).Run()
 	return err
+}
+
+// printLogoStrip writes the brand-image strip as plain pre-TUI output.
+// kitty placeholder runes (U+10EEEE) are dropped by bubbletea v2's cellbuf,
+// so in-frame images are not possible today; instead the strip is drawn at
+// the cursor before the program starts and the TUI runs inline beneath it.
+func (m *model) printLogoStrip() {
+	if !kitty.Capable() {
+		return
+	}
+	seen := map[string]bool{}
+	var items []kitty.StripItem
+	for _, s := range m.sessions {
+		if s.latest == nil {
+			continue
+		}
+		for _, p := range s.latest.AgentPanes() {
+			if p.Agent == "" || seen[p.Agent] {
+				continue
+			}
+			seen[p.Agent] = true
+			if b, ok := brands.PNG(p.Agent); ok {
+				label := lipgloss.NewStyle().Foreground(lipgloss.Color(strategy.ColorFor(p.Agent))).Render(p.Agent)
+				items = append(items, kitty.StripItem{PNG: b, Label: " " + label + "   ", Cols: 2, Rows: 1})
+			}
+		}
+	}
+	if len(items) > 0 {
+		_ = kitty.Strip(os.Stdout, items)
+	}
 }
 
 func newList() list.Model {
@@ -529,12 +562,10 @@ func (m *model) footer() string {
 	}
 }
 
-// View satisfies tea.Model: v2 returns a View struct, and alt screen is a
-// View field rather than a program option.
+// View satisfies tea.Model. Runs inline (no alt screen): the brand strip
+// printed before the program stays visible above the frame.
 func (m *model) View() tea.View {
-	v := tea.NewView(m.render())
-	v.AltScreen = true
-	return v
+	return tea.NewView(m.render())
 }
 
 func (m *model) render() string {
