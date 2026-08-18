@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/table"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/table"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/abhirupdas/herdr-archive/internal/capture"
 	"github.com/abhirupdas/herdr-archive/internal/manifest"
@@ -122,7 +122,7 @@ func Run() error {
 		}),
 	)
 	m.syncSessionList()
-	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	_, err := tea.NewProgram(m).Run()
 	return err
 }
 
@@ -529,7 +529,15 @@ func (m *model) footer() string {
 	}
 }
 
-func (m *model) View() string {
+// View satisfies tea.Model: v2 returns a View struct, and alt screen is a
+// View field rather than a program option.
+func (m *model) View() tea.View {
+	v := tea.NewView(m.render())
+	v.AltScreen = true
+	return v
+}
+
+func (m *model) render() string {
 	var b strings.Builder
 	b.WriteString(m.title())
 	b.WriteString("\n")
