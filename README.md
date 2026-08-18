@@ -96,17 +96,21 @@ charm.land v2 (bubbletea v2, lipgloss v2, bubbles v2: list/table/spinner).
 
 ### Brand images
 
-On kitty-graphics terminals (Ghostty, kitty) `browse` prints a strip of
-real brand favicons above the UI — fetched once from public favicon
-endpoints, cached at `~/.config/herdr-archive/icons/`. Kinds without a
-fetchable mark (pi) and non-graphics terminals fall back to the colored
-glyphs (✳ ∞ π ✕ …).
+The official brand marks (claude.ai, openai.com, grok.com, pi.dev, …) are
+baked into the binary (`internal/brands/logos/`, fetched once from each
+product's own favicon — no runtime network). On kitty-graphics terminals
+(Ghostty, kitty) `browse` transmits them quietly before the first frame,
+creates virtual placements, and renders **real images inline in the rows** —
+plan table, agent rosters, and layout preview — via kitty's unicode
+placeholders (U+10EEEE + row diacritics + image id as a 256-color fg).
 
-Known limitation: kitty's unicode-placeholder scheme (U+10EEEE in the
-frame) is the only way to pin images inside a bubbletea frame, and
-bubbletea v2.0.8's cellbuf silently drops that rune (verified with
-tools/puaprobe under a pty). Hence the strip is plain pre-TUI output and
-the TUI runs inline instead of alt-screen. Worth an upstream issue.
+The placeholders are ordinary styled text, so bubbletea v2 carries them
+through frames and repaint diffs for free (verified by tools/puaprobe and
+tools/logosmoke under a pty: rune, diacritic cluster, raw SGR, and
+paint-over-paint all pass through the cellbuf; each icon cell measures
+exactly width 1, so table alignment holds). Terminals without an image
+protocol fall back to colored glyphs — there is no way to show real
+images in text-only terminals.
 
 ## Plugin
 

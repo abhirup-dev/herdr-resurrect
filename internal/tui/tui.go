@@ -106,6 +106,11 @@ type planMsg struct {
 type refreshedMsg struct{}
 type errMsg struct{ err error }
 
+// icons is the per-kind kitty image id registry, assigned once in Run before
+// the program starts. Zero value (no kitty protocol) makes icon() fall back
+// to the colored glyph.
+var icons kitty.Icons
+
 func Run() error {
 	m := &model{
 		width:  96,
@@ -138,39 +143,25 @@ func Run() error {
 	// v2 table ignores keys until focused (lists have no focus gate)
 	m.tbl.Focus()
 	m.syncSessionList()
-	m.printLogoStrip()
+	// brand images: transmit the embedded logos quietly and create virtual
+	// placements; rows then reference them via unicode-placeholder cells,
+	// which travel through bubbletea frames as ordinary styled text
+	if kitty.Capable() {
+		icons = kitty.Setup(os.Stdout, brands.Logo, brands.Kinds)
+		defer fmt.Fprint(os.Stdout, kitty.DeleteAll())
+	}
 	_, err := tea.NewProgram(m).Run()
 	return err
 }
 
-// printLogoStrip writes the brand-image strip as plain pre-TUI output.
-// kitty placeholder runes (U+10EEEE) are dropped by bubbletea v2's cellbuf,
-// so in-frame images are not possible today; instead the strip is drawn at
-// the cursor before the program starts and the TUI runs inline beneath it.
-func (m *model) printLogoStrip() {
-	if !kitty.Capable() {
-		return
+// icon renders the kind's mark: the real brand image as two placeholder
+// cells on kitty-graphics terminals, the colored glyph everywhere else
+// (terminals with no image protocol cannot show real images at all).
+func icon(kind, title string) string {
+	if id, ok := icons.Icon(kind, 1); ok {
+		return kitty.Placeholder(id, 2, 1)[0]
 	}
-	seen := map[string]bool{}
-	var items []kitty.StripItem
-	for _, s := range m.sessions {
-		if s.latest == nil {
-			continue
-		}
-		for _, p := range s.latest.AgentPanes() {
-			if p.Agent == "" || seen[p.Agent] {
-				continue
-			}
-			seen[p.Agent] = true
-			if b, ok := brands.PNG(p.Agent); ok {
-				label := lipgloss.NewStyle().Foreground(lipgloss.Color(strategy.ColorFor(p.Agent))).Render(p.Agent)
-				items = append(items, kitty.StripItem{PNG: b, Label: " " + label + "   ", Cols: 2, Rows: 1})
-			}
-		}
-	}
-	if len(items) > 0 {
-		_ = kitty.Strip(os.Stdout, items)
-	}
+	return strategy.GlyphStyled(kind, title)
 }
 
 func newList() list.Model {
@@ -399,7 +390,7 @@ func (m *model) syncTable() {
 		if glyphKind == "" {
 			glyphKind = "shell"
 		}
-		who := strategy.GlyphFor(glyphKind, pp.Manifest.Title) + " " + kind
+		who := icon(glyphKind, pp.Manifest.Title) + " " + kind
 		if prov := strategy.ProviderLabel(pp.Manifest.Agent, pp.Manifest.Env); prov != "" && prov != kind {
 			who = who + " → " + prov
 		}
@@ -464,14 +455,14 @@ func snapshotStats(s *manifest.Snapshot) (agents string, size int64, n int) {
 	return agents, size, len(names)
 }
 
-// agentRoster renders the fleet with per-kind icons: ✳glmlab ∞codexlab πpilab.
+// agentRoster renders the fleet with per-kind brand icons before each name.
 func agentRoster(s *manifest.Snapshot) string {
 	if s == nil {
 		return "—"
 	}
 	var names []string
 	for _, p := range s.AgentPanes() {
-		names = append(names, strategy.GlyphStyled(p.Agent, p.Title)+p.Key)
+		names = append(names, icon(p.Agent, p.Title)+p.Key)
 	}
 	if len(names) > 4 {
 		return strings.Join(names[:4], " ") + " …"
@@ -543,8 +534,8 @@ func (m *model) previewLines() []string {
 				if iconKind == "" {
 					iconKind = "shell"
 				}
-				icon := strategy.GlyphStyled(iconKind, p.Title)
-				out = append(out, fmt.Sprintf("  %s   %s %-16s %-18s %s", pb, glyph, pbranch+" "+icon+" "+p.Key, who, act))
+				mark := icon(iconKind, p.Title)
+				out = append(out, fmt.Sprintf("  %s   %s %-16s %-18s %s", pb, glyph, pbranch+" "+mark+" "+p.Key, who, act))
 			}
 		}
 	}
