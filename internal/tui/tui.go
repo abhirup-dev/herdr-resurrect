@@ -145,8 +145,12 @@ func Run() error {
 	m.syncSessionList()
 	// brand images: transmit the embedded logos quietly and create virtual
 	// placements; rows then reference them via unicode-placeholder cells,
-	// which travel through bubbletea frames as ordinary styled text
-	if kitty.Capable() {
+	// which travel through bubbletea frames as ordinary styled text.
+	// Inside a herdr pane the multiplexer eats the graphics protocol (its
+	// experimental kitty_graphics flag does not forward pane graphics in
+	// 0.8.x), so placeholders would render as blank cells — glyphs there.
+	// HERDR_ARCHIVE_FORCE_IMAGES=1 overrides for testing a future herdr.
+	if kitty.Capable() && (os.Getenv("HERDR_ENV") != "1" || os.Getenv("HERDR_ARCHIVE_FORCE_IMAGES") == "1") {
 		icons = kitty.Setup(os.Stdout, brands.Logo, brands.Kinds)
 		defer fmt.Fprint(os.Stdout, kitty.DeleteAll())
 	}
@@ -155,8 +159,9 @@ func Run() error {
 }
 
 // icon renders the kind's mark: the real brand image as two placeholder
-// cells on kitty-graphics terminals, the colored glyph everywhere else
-// (terminals with no image protocol cannot show real images at all).
+// cells on kitty-graphics terminals, the colored glyph inside herdr panes
+// (herdr eats the graphics protocol) and on terminals with no image
+// protocol at all.
 func icon(kind, title string) string {
 	if id, ok := icons.Icon(kind, 1); ok {
 		return kitty.Placeholder(id, 2, 1)[0]

@@ -112,20 +112,18 @@ exactly width 1, so table alignment holds). Terminals without an image
 protocol fall back to colored glyphs — there is no way to show real
 images in text-only terminals.
 
-**Inside herdr panes** herdr must pass the graphics protocol through to
-the outer terminal — experimental, off by default (herdr 0.8.x):
-
-```toml
-# ~/.config/herdr/config.toml
-[experimental]
-kitty_graphics = true
-```
-
-then `herdr server reload-config` and re-attach (attached clients pick
-the flag up at attach). A browse started before the flag was enabled
-transmitted its images into a void — restart it. Pixel-verified through
-a herdr attach on Ghostty: the plan table paints the spark/knot/π marks
-in the kind column.
+**Inside herdr panes** (herdr 0.8.x): not currently possible. herdr
+terminates every pane pty itself, and its experimental
+`[experimental] kitty_graphics = true` flag does **not** forward pane
+graphics to the client — verified empirically (cursor-placed `a=T`
+images and unicode placeholders both: escapes consumed, zero image
+pixels on screen, confirmed by an independent vision model reading a
+screenshot). So `browse` detects `HERDR_ENV=1` and falls back to the
+colored glyphs — placeholders would otherwise render as blank cells.
+`HERDR_ARCHIVE_FORCE_IMAGES=1` overrides, for testing against a future
+herdr that forwards pane graphics. Outside herdr panes (any terminal
+that speaks kitty graphics natively — Ghostty, kitty), images render
+for real.
 
 ## Plugin
 
