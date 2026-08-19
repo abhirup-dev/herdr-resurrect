@@ -132,6 +132,14 @@ func Session(opts Options) (*manifest.Snapshot, error) {
 		mw := manifest.Workspace{ID: w.WorkspaceID, Label: w.Label}
 		for _, t := range tabs.Tabs {
 			mt := manifest.Tab{ID: t.TabID, Label: t.Label}
+			if tabPanes := panesByTab[t.TabID]; len(tabPanes) > 0 {
+				var layout struct {
+					Layout manifest.Layout `json:"layout"`
+				}
+				if err := herdr.RunInto(&layout, append(scope, "pane", "layout", "--pane", tabPanes[0].PaneID)...); err == nil {
+					mt.Layout = &layout.Layout
+				}
+			}
 			for _, p := range panesByTab[t.TabID] {
 				mp, err := capturePane(scope, p, agentsByPane[p.PaneID])
 				if err != nil {

@@ -15,6 +15,13 @@ title = "herdr-archive smoke test (dump plugin context)"
 contexts = ["global"]
 command = ["./bin/herdr-archive", "action", "ping"]
 
+[[actions]]
+id = "open-browser"
+title = "Open Herdr Archive"
+description = "Open the session archive and additive restoration planner."
+contexts = ["global"]
+command = ["bash", "scripts/open-browser.sh"]
+
 # The interactive browser. Opens as a session-modal popup; closes when the
 # TUI exits. Also available as a plain verb: `herdr-archive browse`.
 [[panes]]

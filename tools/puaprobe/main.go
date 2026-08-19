@@ -28,9 +28,9 @@ func (mo *m) Update(t tea.Msg) (tea.Model, tea.Cmd) {
 func tick() tea.Cmd { return func() tea.Msg { time.Sleep(300 * time.Millisecond); return time.Time{} } }
 
 const (
-	ph      = string(rune(0x10EEEE)) // kitty placeholder rune
-	diacRow1 = string(rune(0x0305)) // macron = row/col 1
-	diacRow2 = string(rune(0x030D)) // vertical line above = row/col 2
+	ph       = string(rune(0x10EEEE)) // kitty placeholder rune
+	diacRow1 = string(rune(0x0305))   // macron = row/col 1
+	diacRow2 = string(rune(0x030D))   // vertical line above = row/col 2
 )
 
 func (mo m) View() tea.View {

@@ -17,6 +17,7 @@ const Version = 1
 // Snapshot is one capture of a herdr session.
 type Snapshot struct {
 	Version    int         `json:"version"`
+	Name       string      `json:"name,omitempty"`
 	CreatedAt  time.Time   `json:"created_at"`
 	Session    string      `json:"session"` // "default" or a named session
 	SessionDir string      `json:"session_dir,omitempty"`
@@ -33,14 +34,43 @@ type Workspace struct {
 
 // Tab is a captured tab.
 type Tab struct {
-	ID    string `json:"id"`
-	Label string `json:"label,omitempty"`
-	Panes []Pane `json:"panes"`
+	ID     string  `json:"id"`
+	Label  string  `json:"label,omitempty"`
+	Panes  []Pane  `json:"panes"`
+	Layout *Layout `json:"layout,omitempty"`
+}
+
+type Layout struct {
+	Area          Rect         `json:"area"`
+	FocusedPaneID string       `json:"focused_pane_id,omitempty"`
+	Panes         []LayoutPane `json:"panes,omitempty"`
+	Splits        []Split      `json:"splits,omitempty"`
+	Zoomed        bool         `json:"zoomed,omitempty"`
+}
+
+type Rect struct {
+	X      int `json:"x"`
+	Y      int `json:"y"`
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
+
+type LayoutPane struct {
+	PaneID  string `json:"pane_id"`
+	Focused bool   `json:"focused,omitempty"`
+	Rect    Rect   `json:"rect"`
+}
+
+type Split struct {
+	ID        string  `json:"id"`
+	Direction string  `json:"direction"`
+	Ratio     float64 `json:"ratio"`
+	Rect      Rect    `json:"rect"`
 }
 
 // Pane is a captured pane. Key is the stable identity used across restores:
-// agent name when present, else the pane label, else the pane id. Pane IDs
-// are never reused by herdr and are informational only.
+// agent name when present, else the pane id. Pane IDs are never reused by
+// herdr and are informational only.
 type Pane struct {
 	Key       string            `json:"key"`
 	PaneID    string            `json:"pane_id"`         // informational, never identity
@@ -158,7 +188,7 @@ func (s *Snapshot) Filter(wsID, tabID string, agents []string) *Snapshot {
 		}
 		return false
 	}
-	out := &Snapshot{Version: s.Version, CreatedAt: s.CreatedAt, Session: s.Session, SessionDir: s.SessionDir}
+	out := &Snapshot{Version: s.Version, Name: s.Name, CreatedAt: s.CreatedAt, Session: s.Session, SessionDir: s.SessionDir}
 	for _, w := range s.Workspaces {
 		if wsID != "" && w.ID != wsID && w.Label != wsID {
 			continue
@@ -168,7 +198,7 @@ func (s *Snapshot) Filter(wsID, tabID string, agents []string) *Snapshot {
 			if tabID != "" && t.ID != tabID && t.Label != tabID {
 				continue
 			}
-			mt := Tab{ID: t.ID, Label: t.Label}
+			mt := Tab{ID: t.ID, Label: t.Label, Layout: t.Layout}
 			for _, p := range t.Panes {
 				if want(p) {
 					mt.Panes = append(mt.Panes, p)
@@ -183,4 +213,10 @@ func (s *Snapshot) Filter(wsID, tabID string, agents []string) *Snapshot {
 		}
 	}
 	return out
+}
+
+// DefaultName returns the human-readable date and time used when a capture
+// is saved without an explicit name.
+func DefaultName(t time.Time) string {
+	return t.Local().Format("Jan 2, 2006 15:04")
 }

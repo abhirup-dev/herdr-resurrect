@@ -17,20 +17,33 @@ herdr-archive captures the pane's **live environment verbatim** (`ps Ewww`)
 and replays it blindly. It assumes no knowledge of how that env was
 produced — wrappers, launchers, or shells.
 
+## Install
+
+From this checkout:
+
+```sh
+make install
+```
+
+This builds the binary, installs the CLI to `~/.local/bin/herdr-archive`, links
+the checkout as a local Herdr plugin, and adds the `prefix + R` keybinding once.
+Use `make help` for separate build, check, CLI, plugin, and keybinding targets.
+`PREFIX`, `BINDIR`, `GO`, `HERDR`, and `HERDR_CONFIG_PATH` are overridable.
+
 ## Verbs
 
 ```
-herdr-archive capture  [--session N] [--workspace ID]      snapshot → manifest
-herdr-archive archive  <session>                           capture + session stop
-herdr-archive resume   <session> [selectors] [--yes]       attach + diff + sweep
-herdr-archive park     --workspace ID [--session N] [--yes] capture + workspace close
-herdr-archive unpark   [selectors] [--into N] [--yes]      recreate + relaunch
+herdr-archive capture  [--session N] [--workspace ID] [--name TEXT]
+herdr-archive archive  --session N [--name TEXT] [--force]
+herdr-archive resume   --session N [selectors] [--yes]
+herdr-archive park     --workspace ID [--session N] [--name TEXT] [--yes]
+herdr-archive unpark   [selectors] [--session N] [--into N] [--yes]
 selectors: --workspace | --tab | --agent   (partial resume)
 ```
 
-Everything mutating is a dry-run until `--yes`. `resume` with no `--yes` is
-the audit: per-pane verdicts (KEEP-NATIVE / REPLACE / RELAUNCH / RESURRECT)
-with the exact env keys that drifted.
+Everything mutating is a dry-run until `--yes`. `resume` and `unpark` compile
+the same additive plan used by the TUI: already-live panes are diagnostic only;
+execution adds missing panes and never closes or replaces existing ones.
 
 ## Storage (resurrect conventions)
 
@@ -44,17 +57,20 @@ with the exact env keys that drifted.
 ## How resume works
 
 ```
-archive: capture → herdr session stop (state dir retained on disk)
-resume:  boot server (attach w/ nesting-guard env scrubbed)
-         → herdr snapshot restore rebuilds tabs/panes/cwd
-         → herdr native-resumes agents (claude --resume <sid>, no env)
-         → settle-wait → DIFF manifest vs fresh live capture
-         → REPLACE broken panes: split --env <all> → run <argv> [--resume]
-           → wait detection → rename to captured name → close old pane
-         → verify: re-diff, PASS/FAIL per pane
+capture: live topology + pane geometry + cwd + argv + environment → manifest
+resume:  boot server if needed → capture current live topology
+         → match stable agent identities globally
+         → compile missing panes into additive operations
+         → show projected BEFORE / AFTER trees
+         → create only absent workspaces/tabs/panes
+         → replay cwd + generic environment + native resume command
+         → re-capture; restored panes become live and non-selectable
 ```
 
-The same diff runs against a live session without stop — in-place repair.
+New tabs replay the filtered captured split tree exactly. Omitted leaves collapse
+away while retained ordering, split direction, and ratio are preserved. Adding
+to an already-populated tab is explicitly best-effort so existing topology stays
+untouched.
 
 ## Field learnings (herdr 0.8.0, macOS)
 
@@ -89,10 +105,25 @@ herdr plugin pane open --plugin herdr-archive --entrypoint browser
                                                       # popup inside herdr
 ```
 
-Sessions → snapshots (`●` = `last`) → live diff plan (async, settle-aware).
-`y` runs `resume --yes` full-screen via `tea.ExecProcess` and re-diffs
-after. `p` toggles a layout preview of what a restore produces. Built on
-charm.land v2 (bubbletea v2, lipgloss v2, bubbles v2: list/table/spinner).
+The full-screen flow is:
+
+```
+Sessions
+  └─ workspace targets + composite restoration plan
+       └─ captured workspace tree + hierarchical subset selection
+```
+
+At the workspace level, `space` selects every missing pane and `l` inspects a
+target. In the inspector, tab selection cascades to missing descendants while
+already-live panes are dim, non-focusable, and skipped by `j/k`. `p` previews
+the collapsed selected topology. `R` opens the compiled visual BEFORE / AFTER
+diff; `y` executes those exact additive operations and refreshes live state.
+`backspace` clears the composite selection at either level.
+
+`c` captures the selected session. Capital `C` captures every running session
+from Level 1, or all workspaces in the current session from Level 2. The naming
+dialog is optional; submitting it empty uses a human-readable capture date and
+time.
 
 ### Brand images
 
@@ -127,10 +158,20 @@ for real.
 
 ## Plugin
 
-`herdr plugin link <repo>` — manifest exposes the `browser` popup pane and a
-`ping` smoke action; all real verbs are CLI (deliberate: no automatic
-capture yet). `HERDR_BIN_PATH` is honored so the same binary works as a
-plugin command.
+`herdr plugin link <repo>` registers the `browser` popup and the
+`herdr-archive.open-browser` global action. Bind `prefix + R` in
+`~/.config/herdr/config.toml` with Herdr's shifted-key spelling:
+
+```toml
+[[keys.command]]
+key = "prefix+shift+r"
+type = "plugin_action"
+command = "herdr-archive.open-browser"
+description = "open herdr archive"
+```
+
+The popup inherits `HERDR_SOCKET_PATH`, so the invoking Herdr session is
+selected automatically at Level 1. `HERDR_BIN_PATH` is honored by the launcher.
 
 ## Not yet
 

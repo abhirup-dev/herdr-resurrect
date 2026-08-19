@@ -10,6 +10,7 @@ import (
 	"github.com/abhirupdas/herdr-archive/internal/capture"
 	"github.com/abhirupdas/herdr-archive/internal/herdr"
 	"github.com/abhirupdas/herdr-archive/internal/manifest"
+	"github.com/abhirupdas/herdr-archive/internal/planner"
 	"github.com/abhirupdas/herdr-archive/internal/resume"
 )
 
@@ -21,6 +22,7 @@ func (s *stringsArg) Set(v string) error { *s = append(*s, v); return nil }
 func cmdCapture(args []string) int {
 	fs := flag.NewFlagSet("capture", flag.ContinueOnError)
 	session := fs.String("session", "default", `herdr session name ("default" targets the default session)`)
+	name := fs.String("name", "", "durable name for this restoration target")
 	out := fs.String("out", "", "archive root (default ~/.config/herdr/archives)")
 	var workspaces stringsArg
 	fs.Var(&workspaces, "workspace", "capture only this workspace (repeatable)")
@@ -33,13 +35,21 @@ func cmdCapture(args []string) int {
 		fmt.Fprintf(os.Stderr, "capture: %v\n", err)
 		return 1
 	}
+	snap.Name = strings.TrimSpace(*name)
+	if snap.Name == "" {
+		snap.Name = manifest.DefaultName(snap.CreatedAt)
+	}
 	path, err := snap.Save(*out)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "capture: save: %v\n", err)
 		return 1
 	}
 
-	fmt.Printf("captured %s -> %s (last -> %s)\n", snap.Session, path, "last")
+	label := ""
+	if snap.Name != "" {
+		label = fmt.Sprintf(" %q", snap.Name)
+	}
+	fmt.Printf("captured %s%s -> %s (last -> %s)\n", snap.Session, label, path, "last")
 	for _, w := range snap.Workspaces {
 		fmt.Printf("  %s %-20s %d tab(s)\n", w.ID, w.Label, len(w.Tabs))
 		for _, t := range w.Tabs {
@@ -64,9 +74,38 @@ func or(s, fallback string) string {
 	return s
 }
 
+func compileSnapshotPlan(session, path string, snap, live *manifest.Snapshot) *planner.Plan {
+	var targets []planner.Target
+	for _, workspace := range snap.Workspaces {
+		key := workspace.ID
+		if workspace.Label != "" {
+			key = workspace.Label
+		}
+		targets = append(targets, planner.Target{
+			WorkspaceKey: key,
+			SnapshotName: snap.Name,
+			SnapshotPath: path,
+			Workspace:    workspace,
+			Selected:     planner.SelectWhole(workspace),
+		})
+	}
+	return planner.Compile(session, targets, live)
+}
+
+func printCompiledPlan(plan *planner.Plan) {
+	for _, operation := range plan.Operations {
+		fmt.Printf("  ADD          %-12s -> %s / %s (%s)\n",
+			operation.Pane.Key, operation.WorkspaceKey, operation.TabKey, operation.Placement.Description())
+	}
+	for _, diagnostic := range plan.Diagnostics {
+		fmt.Printf("  UNCHANGED    %s\n", diagnostic)
+	}
+}
+
 func cmdArchive(args []string) int {
 	fs := flag.NewFlagSet("archive", flag.ContinueOnError)
 	session := fs.String("session", "", "herdr session to archive (required; 'default' needs --force)")
+	name := fs.String("name", "", "durable name for the archive snapshot")
 	out := fs.String("out", "", "archive root (default ~/.config/herdr/archives)")
 	force := fs.Bool("force", false, "allow archiving the default session")
 	if err := fs.Parse(args); err != nil {
@@ -86,6 +125,10 @@ func cmdArchive(args []string) int {
 		fmt.Fprintf(os.Stderr, "archive: %v\n", err)
 		return 1
 	}
+	snap.Name = strings.TrimSpace(*name)
+	if snap.Name == "" {
+		snap.Name = manifest.DefaultName(snap.CreatedAt)
+	}
 	path, err := snap.Save(*out)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "archive: save: %v\n", err)
@@ -104,7 +147,7 @@ func cmdResume(args []string) int {
 	session := fs.String("session", "default", `herdr session to resume`)
 	from := fs.String("from", "", "explicit snapshot path (default: latest for --session)")
 	out := fs.String("out", "", "archive root (default ~/.config/herdr/archives)")
-	yes := fs.Bool("yes", false, "apply the plan (default: dry-run)")
+	yes := fs.Bool("yes", false, "apply the additive plan (default: dry-run)")
 	wsSel := fs.String("workspace", "", "partial: only this workspace (id or label)")
 	tabSel := fs.String("tab", "", "partial: only this tab (id or label)")
 	var agentSel stringsArg
@@ -132,39 +175,32 @@ func cmdResume(args []string) int {
 		fmt.Fprintln(os.Stderr, "resume: selectors matched nothing")
 		return 1
 	}
-
-	if err := resume.EnsureServer(snap.Session); err != nil {
+	if err := resume.EnsureServer(*session); err != nil {
 		fmt.Fprintf(os.Stderr, "resume: %v\n", err)
 		return 1
 	}
-	resume.Settle(snap.Session, 60*time.Second)
-	live, err := capture.Session(capture.Options{Session: snap.Session})
+	resume.Settle(*session, 60*time.Second)
+	live, err := capture.Session(capture.Options{Session: *session})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "resume: live capture: %v\n", err)
 		return 1
 	}
-	plan := resume.Diff(snap, live)
-
-	fmt.Printf("resume %s from %s\n", snap.Session, path)
-	for _, pp := range plan.Panes {
-		fmt.Printf("  %-12s %-12s %s\n", pp.Action, pp.Manifest.Key, pp.Reason)
-	}
-	for _, m := range plan.Missing() {
-		fmt.Printf("  CONFLICT     %s\n", m)
+	plan := compileSnapshotPlan(*session, path, snap, live)
+	fmt.Printf("resume %s from %s\n", *session, path)
+	printCompiledPlan(plan)
+	if len(plan.Operations) == 0 {
+		fmt.Println("nothing missing; existing panes left untouched")
+		return 0
 	}
 	if !*yes {
 		fmt.Println("dry run; apply with --yes")
 		return 0
 	}
-	if err := resume.Apply(plan, false); err != nil {
+	if err := resume.ApplyCompiled(plan); err != nil {
 		fmt.Fprintf(os.Stderr, "resume: apply: %v\n", err)
 		return 1
 	}
-	fmt.Println("verify:")
-	if err := resume.Report(snap); err != nil {
-		fmt.Fprintf(os.Stderr, "resume: verify: %v\n", err)
-		return 1
-	}
+	fmt.Println("additive restoration complete")
 	return 0
 }
 
@@ -172,6 +208,7 @@ func cmdPark(args []string) int {
 	fs := flag.NewFlagSet("park", flag.ContinueOnError)
 	session := fs.String("session", "default", "herdr session holding the workspace")
 	workspace := fs.String("workspace", "", "workspace to park (id or label, required)")
+	name := fs.String("name", "", "durable name for the parked snapshot")
 	out := fs.String("out", "", "archive root (default ~/.config/herdr/archives)")
 	yes := fs.Bool("yes", false, "actually close the workspace (default: dry-run)")
 	if err := fs.Parse(args); err != nil {
@@ -201,6 +238,10 @@ func cmdPark(args []string) int {
 		fmt.Println("dry run; apply with --yes (workspace stays open)")
 		return 0
 	}
+	snap.Name = strings.TrimSpace(*name)
+	if snap.Name == "" {
+		snap.Name = manifest.DefaultName(snap.CreatedAt)
+	}
 	if _, err := snap.Save(*out); err != nil {
 		fmt.Fprintf(os.Stderr, "park: save: %v\n", err)
 		return 1
@@ -219,7 +260,7 @@ func cmdUnpark(args []string) int {
 	into := fs.String("into", "", "target session to recreate in (default: same as --session)")
 	from := fs.String("from", "", "explicit snapshot path (default: latest for --session)")
 	out := fs.String("out", "", "archive root (default ~/.config/herdr/archives)")
-	yes := fs.Bool("yes", false, "actually recreate (default: dry-run)")
+	yes := fs.Bool("yes", false, "apply the additive plan (default: dry-run)")
 	wsSel := fs.String("workspace", "", "only this workspace (id or label)")
 	tabSel := fs.String("tab", "", "only this tab (id or label)")
 	var agentSel stringsArg
@@ -251,13 +292,28 @@ func cmdUnpark(args []string) int {
 		fmt.Fprintf(os.Stderr, "unpark: %v\n", err)
 		return 1
 	}
-	if err := resume.Unpark(target, snap, !*yes); err != nil {
-		fmt.Fprintf(os.Stderr, "unpark: %v\n", err)
+	resume.Settle(target, 60*time.Second)
+	live, err := capture.Session(capture.Options{Session: target})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "unpark: live capture: %v\n", err)
 		return 1
+	}
+	plan := compileSnapshotPlan(target, path, snap, live)
+	fmt.Printf("unpark into %s from %s\n", target, path)
+	printCompiledPlan(plan)
+	if len(plan.Operations) == 0 {
+		fmt.Println("nothing missing; existing panes left untouched")
+		return 0
 	}
 	if !*yes {
 		fmt.Println("dry run; apply with --yes")
+		return 0
 	}
+	if err := resume.ApplyCompiled(plan); err != nil {
+		fmt.Fprintf(os.Stderr, "unpark: apply: %v\n", err)
+		return 1
+	}
+	fmt.Println("additive restoration complete")
 	return 0
 }
 
