@@ -183,9 +183,9 @@ type createdDestination struct {
 }
 
 func createWorkspace(session string, operation planner.Operation) (createdDestination, error) {
-	cwd := operation.WorkspaceCwd
+	cwd := operation.Pane.Cwd
 	if cwd == "" {
-		cwd = operation.Pane.Cwd
+		cwd = operation.WorkspaceCwd
 	}
 	label := operation.WorkspaceLabel
 	if label == "" {
@@ -252,9 +252,13 @@ func splitAdditivePane(session, anchor string, operation planner.Operation) (str
 	if ratio <= 0 || ratio >= 1 {
 		ratio = 0.5
 	}
+	cwd := operation.Pane.Cwd
+	if cwd == "" {
+		cwd = operation.WorkspaceCwd
+	}
 	args := append(herdr.SessionScope(session), "pane", "split", "--pane", anchor,
 		"--direction", direction, "--ratio", fmt.Sprintf("%.4f", ratio),
-		"--cwd", operation.Pane.Cwd, "--no-focus")
+		"--cwd", cwd, "--no-focus")
 	args = appendReplayEnv(args, operation.Pane.Env)
 	var result struct {
 		Pane struct {
