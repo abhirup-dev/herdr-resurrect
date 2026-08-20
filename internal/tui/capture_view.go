@@ -17,9 +17,10 @@ type captureLiveMsg struct {
 }
 
 type captureNode struct {
+	kind           nodeKind
 	workspaceIndex int
 	tabIndex       int
-	paneIndex      int // -2 workspace, -1 tab
+	paneIndex      int
 }
 
 func loadCaptureLiveCmd(session string) tea.Cmd {
@@ -35,56 +36,20 @@ func captureNodes(snapshot *manifest.Snapshot) []captureNode {
 	}
 	var nodes []captureNode
 	for workspaceIndex, workspace := range snapshot.Workspaces {
-		nodes = append(nodes, captureNode{workspaceIndex: workspaceIndex, tabIndex: -1, paneIndex: -2})
+		nodes = append(nodes, captureNode{kind: workspaceNode, workspaceIndex: workspaceIndex})
 		for tabIndex, tab := range workspace.Tabs {
-			nodes = append(nodes, captureNode{workspaceIndex: workspaceIndex, tabIndex: tabIndex, paneIndex: -1})
+			nodes = append(nodes, captureNode{kind: tabNode, workspaceIndex: workspaceIndex, tabIndex: tabIndex})
 			for paneIndex := range tab.Panes {
-				nodes = append(nodes, captureNode{workspaceIndex: workspaceIndex, tabIndex: tabIndex, paneIndex: paneIndex})
+				nodes = append(nodes, captureNode{
+					kind:           paneNode,
+					workspaceIndex: workspaceIndex,
+					tabIndex:       tabIndex,
+					paneIndex:      paneIndex,
+				})
 			}
 		}
 	}
 	return nodes
-}
-
-func captureSelection(snapshot *manifest.Snapshot) planner.Selection {
-	selection := planner.Selection{}
-	if snapshot == nil {
-		return selection
-	}
-	for _, workspace := range snapshot.Workspaces {
-		for _, key := range planner.PaneKeys(workspace) {
-			selection[key] = true
-		}
-	}
-	return selection
-}
-
-func captureSelectedCount(snapshot *manifest.Snapshot, selection planner.Selection) (selected, total int) {
-	if snapshot == nil {
-		return
-	}
-	for _, workspace := range snapshot.Workspaces {
-		count, workspaceTotal := planner.SelectedCount(workspace, selection)
-		selected += count
-		total += workspaceTotal
-	}
-	return
-}
-
-func captureTabSelectedCount(tab manifest.Tab, selection planner.Selection) (selected, total int) {
-	return planner.TabSelectedCount(tab, selection)
-}
-
-func toggleCaptureWorkspace(workspace manifest.Workspace, selection planner.Selection) {
-	selected, total := planner.SelectedCount(workspace, selection)
-	selectAll := selected != total
-	for _, key := range planner.PaneKeys(workspace) {
-		if selectAll {
-			selection[key] = true
-		} else {
-			delete(selection, key)
-		}
-	}
 }
 
 func (m *model) toggleCaptureNode() {
@@ -94,31 +59,14 @@ func (m *model) toggleCaptureNode() {
 	}
 	node := nodes[m.captureCursor]
 	workspace := m.captureLive.Workspaces[node.workspaceIndex]
-	switch node.paneIndex {
-	case -2:
-		toggleCaptureWorkspace(workspace, m.captureSelection)
-	case -1:
+	switch node.kind {
+	case workspaceNode:
+		planner.ToggleWorkspace(workspace, m.captureSelection)
+	case tabNode:
 		planner.ToggleTab(workspace.Tabs[node.tabIndex], m.captureSelection)
-	default:
+	case paneNode:
 		planner.TogglePane(workspace.Tabs[node.tabIndex].Panes[node.paneIndex].Key, m.captureSelection)
 	}
-}
-
-func (m *model) selectedCapturePaneIDs() []string {
-	if m.captureLive == nil {
-		return nil
-	}
-	var paneIDs []string
-	for _, workspace := range m.captureLive.Workspaces {
-		for _, tab := range workspace.Tabs {
-			for _, pane := range tab.Panes {
-				if m.captureSelection[pane.Key] {
-					paneIDs = append(paneIDs, pane.PaneID)
-				}
-			}
-		}
-	}
-	return paneIDs
 }
 
 func (m *model) captureTreeLines() []string {
@@ -140,7 +88,7 @@ func (m *model) captureTreeLines() []string {
 		for _, tab := range workspace.Tabs {
 			tabNodeIndex := nodeIndex
 			nodeIndex++
-			selected, total := captureTabSelectedCount(tab, m.captureSelection)
+			selected, total := planner.TabSelectedCount(tab, m.captureSelection)
 			tabName := tab.Label
 			if tabName == "" {
 				tabName = tab.ID
@@ -186,7 +134,7 @@ func (m *model) captureView() string {
 	if m.spinning || m.captureLive == nil {
 		return m.spin.View() + styDim.Render(" reading live topology…")
 	}
-	selected, total := captureSelectedCount(m.captureLive, m.captureSelection)
+	selected, total := planner.SnapshotSelectedCount(m.captureLive, m.captureSelection)
 	out := []string{
 		styTitle.Render("SELECT LIVE PANES TO CAPTURE"),
 		treeMetadata(treeNeutral(fmt.Sprintf("%d/%d selected", selected, total)), treeNeutral("full topology retained as context")),

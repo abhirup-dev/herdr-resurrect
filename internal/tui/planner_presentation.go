@@ -8,24 +8,27 @@ import (
 
 	"github.com/abhirup-dev/herdr-resurrect/internal/manifest"
 	"github.com/abhirup-dev/herdr-resurrect/internal/planner"
-	"github.com/abhirup-dev/herdr-resurrect/internal/strategy"
 )
 
 const transcriptSizeDisplayThreshold = 400 * 1024
 
 type plannerTargetStats struct {
-	agents         int
-	shells         int
-	tabs           int
-	panes          int
-	transcriptSize int64
-	liveKnown      bool
-	liveCount      int
-	missing        int
+	agents           int
+	shells           int
+	tabs             int
+	panes            int
+	transcriptSize   int64
+	liveKnown        bool
+	workspacePresent bool
+	liveAgents       int
+	missingAgents    int
+	liveShells       int
+	missingShells    int
+	readyPanes       int
 }
 
 func (s plannerTargetStats) workspaceMissing() bool {
-	return s.missing > 0 && s.liveCount == 0
+	return s.liveKnown && !s.workspacePresent
 }
 
 type plannerDetailsBuilder struct {
@@ -91,13 +94,20 @@ func (b *plannerDetailsBuilder) withLiveState(stats plannerTargetStats) *planner
 	if !stats.liveKnown || stats.workspaceMissing() {
 		return b
 	}
-	liveMeta := treeNeutral(fmt.Sprintf("%d live", stats.liveCount))
-	if stats.liveCount > 0 {
-		liveMeta = treeLive(fmt.Sprintf("%d live", stats.liveCount))
+	if stats.liveAgents > 0 {
+		b.details = append(b.details, treeLive(fmt.Sprintf("%d %s live", stats.liveAgents, plural(stats.liveAgents, "agent"))))
 	}
-	b.details = append(b.details, liveMeta)
-	if stats.missing > 0 {
-		b.details = append(b.details, treeMissing(fmt.Sprintf("%d missing", stats.missing)))
+	if stats.missingAgents > 0 {
+		b.details = append(b.details, treeMissing(fmt.Sprintf("%d %s missing", stats.missingAgents, plural(stats.missingAgents, "agent"))))
+	}
+	if stats.liveShells > 0 {
+		b.details = append(b.details, treeLive(fmt.Sprintf("%d %s live", stats.liveShells, plural(stats.liveShells, "shell"))))
+	}
+	if stats.missingShells > 0 {
+		b.details = append(b.details, treeMissing(fmt.Sprintf("%d %s missing", stats.missingShells, plural(stats.missingShells, "shell"))))
+	}
+	if stats.readyPanes > 0 {
+		b.details = append(b.details, treeLive(fmt.Sprintf("%d %s ready", stats.readyPanes, plural(stats.readyPanes, "pane"))))
 	}
 	return b
 }
@@ -114,29 +124,19 @@ func (b *plannerDetailsBuilder) build() string {
 }
 
 func (m *model) collectPlannerTargetStats(target workspaceTarget) plannerTargetStats {
-	stats := plannerTargetStats{
-		tabs:      len(target.workspace.Tabs),
-		liveKnown: m.live != nil,
+	occupancy := planner.TargetOccupancy(target.snapshot, target.workspace, m.live, targetAllowed(target))
+	return plannerTargetStats{
+		agents:           occupancy.Agents,
+		shells:           occupancy.Shells,
+		tabs:             occupancy.Tabs,
+		panes:            occupancy.Panes,
+		transcriptSize:   occupancy.TranscriptSize,
+		liveKnown:        m.live != nil,
+		workspacePresent: occupancy.WorkspacePresent,
+		liveAgents:       occupancy.LiveAgents,
+		missingAgents:    occupancy.MissingAgents,
+		liveShells:       occupancy.LiveShells,
+		missingShells:    occupancy.MissingShells,
+		readyPanes:       occupancy.ReadyPanes,
 	}
-	for _, tab := range target.workspace.Tabs {
-		stats.panes += len(tab.Panes)
-		for _, pane := range tab.Panes {
-			if !target.snapshot.CapturesPane(target.workspace.ID, tab.ID, pane.Key) {
-				continue
-			}
-			if pane.Agent == "" {
-				stats.shells++
-				continue
-			}
-			stats.agents++
-			stats.transcriptSize += strategy.TranscriptSize(pane.Agent, pane.SID, pane.Env)
-		}
-	}
-	if m.live != nil {
-		states := m.targetStates(target)
-		_, stats.missing, stats.liveCount = planner.RestorableCountWithin(
-			target.workspace, nil, states, targetAllowed(target),
-		)
-	}
-	return stats
 }

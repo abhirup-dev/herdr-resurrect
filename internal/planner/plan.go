@@ -70,19 +70,20 @@ func (placement Placement) Description() string {
 // Operation is one additive pane restoration. It is the unit shown by dry-run
 // output and consumed unchanged by the executor.
 type Operation struct {
-	WorkspaceKey     string
-	WorkspaceID      string
-	WorkspaceLabel   string
-	WorkspaceCwd     string
-	TabKey           string
-	TabID            string
-	TabLabel         string
-	FallbackPaneID   string
-	Pane             manifest.Pane
-	Placement        Placement
-	SnapshotName     string
-	CapturedTab      manifest.Tab
-	CapturedSelected Selection
+	WorkspaceKey      string
+	WorkspaceID       string
+	WorkspaceLabel    string
+	WorkspaceCwd      string
+	TabKey            string
+	TabID             string
+	TabLabel          string
+	FallbackPaneID    string
+	DestinationPaneID string
+	Pane              manifest.Pane
+	Placement         Placement
+	SnapshotName      string
+	CapturedTab       manifest.Tab
+	CapturedSelected  Selection
 }
 
 // Change annotates a node in the projected topology.
@@ -136,10 +137,7 @@ func Analyze(workspace manifest.Workspace, live *manifest.Snapshot) map[string]P
 	for _, tab := range workspace.Tabs {
 		for _, pane := range tab.Panes {
 			state := PaneState{Availability: Restorable}
-			lp, ok := byName[paneIdentity(pane)]
-			if !ok && pane.PaneID != "" {
-				lp, ok = byPane[pane.PaneID]
-			}
+			lp, ok := matchedLivePane(pane, byName, byPane)
 			if ok {
 				state.Availability = Live
 				copy := lp
@@ -286,6 +284,9 @@ func Compile(session string, targets []Target, live *manifest.Snapshot) *Plan {
 					included[pane.Key] = true
 				}
 			}
+			destinationPanes := reusableDestinationPanes(
+				tab, selected, states, tabByWorkspace[target.WorkspaceKey][tabKey],
+			)
 			mode := GeometryExact
 			if tabID != "" {
 				mode = GeometryBestEffort
@@ -307,19 +308,20 @@ func Compile(session string, targets []Target, live *manifest.Snapshot) *Plan {
 				}
 				pane := paneByKey[paneKey]
 				plan.Operations = append(plan.Operations, Operation{
-					WorkspaceKey:     target.WorkspaceKey,
-					WorkspaceID:      workspaceID,
-					WorkspaceLabel:   target.Workspace.Label,
-					WorkspaceCwd:     target.Workspace.Cwd,
-					TabKey:           tabKey,
-					TabID:            tabID,
-					TabLabel:         tab.Label,
-					FallbackPaneID:   fallbackPaneID,
-					Pane:             pane,
-					Placement:        placements[paneKey],
-					SnapshotName:     target.SnapshotName,
-					CapturedTab:      tab,
-					CapturedSelected: selected,
+					WorkspaceKey:      target.WorkspaceKey,
+					WorkspaceID:       workspaceID,
+					WorkspaceLabel:    target.Workspace.Label,
+					WorkspaceCwd:      target.Workspace.Cwd,
+					TabKey:            tabKey,
+					TabID:             tabID,
+					TabLabel:          tab.Label,
+					FallbackPaneID:    fallbackPaneID,
+					DestinationPaneID: destinationPanes[paneKey],
+					Pane:              pane,
+					Placement:         placements[paneKey],
+					SnapshotName:      target.SnapshotName,
+					CapturedTab:       tab,
+					CapturedSelected:  selected,
 				})
 			}
 		}
@@ -331,10 +333,7 @@ func Compile(session string, targets []Target, live *manifest.Snapshot) *Plan {
 				if !target.Selected[pane.Key] {
 					continue
 				}
-				lp, ok := liveByName[paneIdentity(pane)]
-				if !ok && pane.PaneID != "" {
-					lp, ok = liveByPane[pane.PaneID]
-				}
+				lp, ok := matchedLivePane(pane, liveByName, liveByPane)
 				if ok {
 					detail := "already live; left untouched"
 					if drift := environmentDrift(pane.Env, lp.Pane.Env); len(drift) > 0 {
@@ -398,6 +397,81 @@ func paneIdentity(pane manifest.Pane) string {
 	return "pane:" + pane.Key
 }
 
+func matchedLivePane(pane manifest.Pane, byIdentity, byPane map[string]LivePane) (LivePane, bool) {
+	if live, ok := byIdentity[paneIdentity(pane)]; ok {
+		return live, true
+	}
+	if pane.PaneID == "" {
+		return LivePane{}, false
+	}
+	live, ok := byPane[pane.PaneID]
+	if !ok || !sameOccupant(pane, live.Pane) {
+		return LivePane{}, false
+	}
+	return live, true
+}
+
+func sameOccupant(captured, live manifest.Pane) bool {
+	if captured.Agent == "" {
+		return live.Agent == ""
+	}
+	return live.Agent == captured.Agent
+}
+
+// ReusableShellPane reports whether a live pane is positively identified as
+// an idle shell. Shell is set for a non-agent foreground command or when no
+// foreground process was identifiable; both remain untouched to fail closed.
+func ReusableShellPane(pane manifest.Pane) bool {
+	return pane.Agent == "" && !pane.Shell
+}
+
+func reusableDestinationPanes(
+	captured manifest.Tab,
+	selected Selection,
+	states map[string]PaneState,
+	live manifest.Tab,
+) map[string]string {
+	assignments := map[string]string{}
+	reserved := map[string]bool{}
+	for _, state := range states {
+		if state.Live != nil {
+			reserved[state.Live.Pane.PaneID] = true
+		}
+	}
+	available := make([]manifest.Pane, 0, len(live.Panes))
+	for _, pane := range live.Panes {
+		if ReusableShellPane(pane) && !reserved[pane.PaneID] {
+			available = append(available, pane)
+		}
+	}
+	used := map[string]bool{}
+	for _, pane := range captured.Panes {
+		if !selected[pane.Key] {
+			continue
+		}
+		for _, candidate := range available {
+			if !used[candidate.PaneID] && candidate.PaneID == pane.PaneID {
+				assignments[pane.Key] = candidate.PaneID
+				used[candidate.PaneID] = true
+				break
+			}
+		}
+	}
+	for _, pane := range captured.Panes {
+		if !selected[pane.Key] || assignments[pane.Key] != "" {
+			continue
+		}
+		for _, candidate := range available {
+			if !used[candidate.PaneID] {
+				assignments[pane.Key] = candidate.PaneID
+				used[candidate.PaneID] = true
+				break
+			}
+		}
+	}
+	return assignments
+}
+
 func manifestWorkspaceKey(workspace manifest.Workspace) string {
 	if workspace.Label != "" {
 		return workspace.Label
@@ -450,16 +524,31 @@ func liveTopologyIndex(live *manifest.Snapshot) (map[string]manifest.Workspace, 
 	return workspaces, tabs
 }
 
-func environmentDrift(captured, live map[string]string) []string {
+// EnvironmentDrift compares replayable captured state with the live pane.
+// Extra live values are harmless; transient values are excluded by ReplayEnv.
+func EnvironmentDrift(captured, live map[string]string) (missing, changed []string) {
 	want := strategy.ReplayEnv(captured)
 	have := strategy.ReplayEnv(live)
-	var drift []string
 	for key, value := range want {
 		if current, ok := have[key]; !ok {
-			drift = append(drift, key+" missing")
+			missing = append(missing, key)
 		} else if current != value {
-			drift = append(drift, key+" changed")
+			changed = append(changed, key)
 		}
+	}
+	sort.Strings(missing)
+	sort.Strings(changed)
+	return missing, changed
+}
+
+func environmentDrift(captured, live map[string]string) []string {
+	missing, changed := EnvironmentDrift(captured, live)
+	drift := make([]string, 0, len(missing)+len(changed))
+	for _, key := range missing {
+		drift = append(drift, key+" missing")
+	}
+	for _, key := range changed {
+		drift = append(drift, key+" changed")
 	}
 	sort.Strings(drift)
 	return drift
@@ -514,8 +603,17 @@ func projectedTopology(before Topology, operations []Operation) Topology {
 		} else if workspace.Tabs[tabIndex].Change == Unchanged {
 			workspace.Tabs[tabIndex].Change = Expanded
 		}
-		workspace.Tabs[tabIndex].Panes = append(workspace.Tabs[tabIndex].Panes,
-			TopologyPane{Key: operation.Pane.Key, Pane: operation.Pane, Change: Added})
+		tab := &workspace.Tabs[tabIndex]
+		if operation.DestinationPaneID != "" {
+			for i := range tab.Panes {
+				if tab.Panes[i].Pane.PaneID == operation.DestinationPaneID {
+					tab.Panes[i] = TopologyPane{Key: operation.Pane.Key, Pane: operation.Pane, Change: Added}
+					goto nextOperation
+				}
+			}
+		}
+		tab.Panes = append(tab.Panes, TopologyPane{Key: operation.Pane.Key, Pane: operation.Pane, Change: Added})
+	nextOperation:
 	}
 	return after
 }

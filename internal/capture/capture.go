@@ -287,19 +287,51 @@ type SessionInfo sessionEntry
 // callers can tell a "running" session whose fleet died (stale) from a
 // faithful one.
 func LiveAgents(session string) ([]string, error) {
+	entries, err := liveAgentEntries(session)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, agent := range entries {
+		if agent.Name != "" {
+			names = append(names, agent.Name)
+		}
+	}
+	return names, nil
+}
+
+// LiveActivity reports recognized live agents and the workspaces they occupy.
+func LiveActivity(session string) (agents, workspaces int, err error) {
+	entries, err := liveAgentEntries(session)
+	if err != nil {
+		return 0, 0, err
+	}
+	agents, workspaces = liveActivity(entries)
+	return agents, workspaces, nil
+}
+
+func liveAgentEntries(session string) ([]agentEntry, error) {
 	var list struct {
 		Agents []agentEntry `json:"agents"`
 	}
 	if err := herdr.RunInto(&list, append(herdr.SessionScope(session), "agent", "list")...); err != nil {
 		return nil, err
 	}
-	var names []string
-	for _, a := range list.Agents {
-		if a.Name != "" {
-			names = append(names, a.Name)
+	return list.Agents, nil
+}
+
+func liveActivity(entries []agentEntry) (agents, workspaces int) {
+	populated := map[string]bool{}
+	for _, agent := range entries {
+		if agent.Agent == "" {
+			continue
+		}
+		agents++
+		if workspace, _, ok := strings.Cut(agent.PaneID, ":p"); ok && workspace != "" {
+			populated[workspace] = true
 		}
 	}
-	return names, nil
+	return agents, len(populated)
 }
 
 // Sessions lists every herdr session on the machine.

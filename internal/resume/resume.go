@@ -8,13 +8,13 @@ package resume
 import (
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/abhirup-dev/herdr-resurrect/internal/capture"
 	"github.com/abhirup-dev/herdr-resurrect/internal/herdr"
 	"github.com/abhirup-dev/herdr-resurrect/internal/manifest"
+	"github.com/abhirup-dev/herdr-resurrect/internal/planner"
 	"github.com/abhirup-dev/herdr-resurrect/internal/strategy"
 )
 
@@ -80,7 +80,7 @@ func Diff(snap *manifest.Snapshot, live *manifest.Snapshot) *Plan {
 					pp.Reason = resurrectReason(pp.Fresh)
 				default:
 					pp.Live = &lp
-					lost, changed := envDrift(mp.Env, lp.Env)
+					lost, changed := planner.EnvironmentDrift(mp.Env, lp.Env)
 					// A live pane whose env matches the manifest is
 					// faithful as-is — a dead sid alone never justifies
 					// replacing a working agent.
@@ -88,7 +88,7 @@ func Diff(snap *manifest.Snapshot, live *manifest.Snapshot) *Plan {
 					case len(lost) > 0:
 						pp.Action, pp.Reason = Replace, fmt.Sprintf("lost env: %s", clip(lost))
 					case len(changed) > 0:
-						pp.Action, pp.Reason = Replace, fmt.Sprintf("provider env changed: %s", clip(changed))
+						pp.Action, pp.Reason = Replace, fmt.Sprintf("replay env changed: %s", clip(changed))
 					default:
 						pp.Action, pp.Reason = KeepNative, "live env matches manifest"
 					}
@@ -175,32 +175,6 @@ func Settle(session string, timeout time.Duration) {
 		}
 		time.Sleep(2 * time.Second)
 	}
-}
-
-// envDrift compares manifest env against live env. lost = non-transient
-// manifest keys absent live; changed = provider vars present both sides with
-// different values.
-func envDrift(man, live map[string]string) (lost, changed []string) {
-	if len(man) == 0 {
-		return nil, nil // nothing captured (e.g. pi scrubs env): faithful by definition
-	}
-	keys := make([]string, 0, len(man))
-	for k := range man {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		if strategy.ReplayTransientEnv(k, man[k]) {
-			continue
-		}
-		v, ok := live[k]
-		if !ok {
-			lost = append(lost, k)
-		} else if strategy.ProviderVar(k) && v != man[k] {
-			changed = append(changed, k)
-		}
-	}
-	return lost, changed
 }
 
 // serverUp reports whether the session's server answers.
@@ -316,45 +290,11 @@ func launchPane(session, anchor string, pp PanePlan, relaunch string) (string, e
 	if _, err := herdr.Run(append(scope, "pane", "run", np, relaunch)...); err != nil {
 		return np, fmt.Errorf("run: %w", err)
 	}
-	ok := false
-	for i := 0; i < 45; i++ {
-		var probe struct {
-			Agent struct {
-				Agent string `json:"agent"`
-			} `json:"agent"`
-		}
-		if err := herdr.RunInto(&probe, append(scope, "agent", "get", np)...); err == nil && probe.Agent.Agent != "" {
-			ok = true
-			break
-		}
-		time.Sleep(time.Second)
+	if err := waitForAgent(session, np); err != nil {
+		return np, err
 	}
-	if !ok {
-		return np, fmt.Errorf("agent not detected in %s within 45s", np)
-	}
-	// Re-attach the captured name: identity must survive the swap so herdr
-	// UX and future diffs match the pane by name again. If the name is
-	// taken (e.g. unparking into a session that still holds it), auto-
-	// resolve with a numeric suffix rather than failing the restore.
-	if pp.Manifest.Name != "" {
-		name := pp.Manifest.Name
-		for attempt := 0; ; attempt++ {
-			candidate := name
-			if attempt > 0 {
-				// agent names are [a-z][a-z0-9_-]{0,31}: dots are illegal
-				candidate = fmt.Sprintf("%s-%d", name, attempt)
-			}
-			_, err := herdr.Run(append(scope, "agent", "rename", np, candidate)...)
-			if err == nil {
-				if candidate != name {
-					fmt.Printf("  !            %s: name taken, restored as %s\n", name, candidate)
-				}
-				break
-			}
-			if attempt >= 5 {
-				return np, fmt.Errorf("rename: %w", err)
-			}
-		}
+	if err := attachName(session, np, pp.Manifest.Name); err != nil {
+		return np, err
 	}
 	return np, nil
 }

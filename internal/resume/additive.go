@@ -2,7 +2,6 @@ package resume
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/abhirup-dev/herdr-resurrect/internal/capture"
 	"github.com/abhirup-dev/herdr-resurrect/internal/herdr"
@@ -16,6 +15,8 @@ type additiveState struct {
 	tabIDs            map[string]string
 	fallbacks         map[string]string
 	paneIDs           map[string]string
+	paneDestinations  map[string]string
+	emptyPanes        map[string]bool
 	liveNames         map[string]bool
 	createdWorkspaces map[string]bool
 	createdTabs       map[string]bool
@@ -32,6 +33,8 @@ func ApplyCompiled(plan *planner.Plan) error {
 		tabIDs:            map[string]string{},
 		fallbacks:         map[string]string{},
 		paneIDs:           map[string]string{},
+		paneDestinations:  map[string]string{},
+		emptyPanes:        map[string]bool{},
 		liveNames:         map[string]bool{},
 		createdWorkspaces: map[string]bool{},
 		createdTabs:       map[string]bool{},
@@ -92,6 +95,10 @@ func (state *additiveState) indexLive(live *manifest.Snapshot) {
 			for _, pane := range tab.Panes {
 				state.liveNames[paneIdentity(pane)] = true
 				state.paneIDs[pane.Key] = pane.PaneID
+				state.paneDestinations[pane.PaneID] = key
+				if planner.ReusableShellPane(pane) {
+					state.emptyPanes[pane.PaneID] = true
+				}
 			}
 		}
 	}
@@ -111,6 +118,14 @@ func validateCompiledDestination(state *additiveState, operation planner.Operati
 		return fmt.Errorf("stale plan: tab %q appeared after confirmation", operation.TabKey)
 	case operation.TabID != "" && currentTabID != operation.TabID:
 		return fmt.Errorf("stale plan: tab %q changed after confirmation", operation.TabKey)
+	}
+	if operation.DestinationPaneID != "" {
+		if state.paneDestinations[operation.DestinationPaneID] != destination {
+			return fmt.Errorf("stale plan: destination pane %q moved after confirmation", operation.DestinationPaneID)
+		}
+		if !state.emptyPanes[operation.DestinationPaneID] {
+			return fmt.Errorf("stale plan: destination pane %q is no longer empty", operation.DestinationPaneID)
+		}
 	}
 	return nil
 }
@@ -152,6 +167,15 @@ func applyAdditiveOperation(session string, state *additiveState, operation plan
 			return err
 		}
 		state.paneIDs[operation.Pane.Key] = created.paneID
+		return nil
+	}
+
+	if operation.DestinationPaneID != "" {
+		if err := launchInPane(session, operation.DestinationPaneID, operation.Pane); err != nil {
+			return err
+		}
+		state.paneIDs[operation.Pane.Key] = operation.DestinationPaneID
+		delete(state.emptyPanes, operation.DestinationPaneID)
 		return nil
 	}
 
@@ -287,36 +311,10 @@ func launchInPane(session, paneID string, pane manifest.Pane) error {
 	if _, err := herdr.Run(append(herdr.SessionScope(session), "pane", "run", paneID, command)...); err != nil {
 		return fmt.Errorf("run: %w", err)
 	}
-	for attempt := 0; attempt < 45; attempt++ {
-		var probe struct {
-			Agent struct {
-				Agent string `json:"agent"`
-			} `json:"agent"`
-		}
-		if err := herdr.RunInto(&probe, append(herdr.SessionScope(session), "agent", "get", paneID)...); err == nil && probe.Agent.Agent != "" {
-			return renameRestoredAgent(session, paneID, pane.Name)
-		}
-		time.Sleep(time.Second)
+	if err := waitForAgent(session, paneID); err != nil {
+		return err
 	}
-	return fmt.Errorf("agent not detected in %s within 45s", paneID)
-}
-
-func renameRestoredAgent(session, paneID, name string) error {
-	if name == "" {
-		return nil
-	}
-	for attempt := 0; attempt <= 5; attempt++ {
-		candidate := name
-		if attempt > 0 {
-			candidate = fmt.Sprintf("%s-%d", name, attempt)
-		}
-		if _, err := herdr.Run(append(herdr.SessionScope(session), "agent", "rename", paneID, candidate)...); err == nil {
-			return nil
-		} else if attempt == 5 {
-			return fmt.Errorf("rename: %w", err)
-		}
-	}
-	return nil
+	return attachName(session, paneID, pane.Name)
 }
 
 func destinationKey(workspaceKey, tabKey string) string {

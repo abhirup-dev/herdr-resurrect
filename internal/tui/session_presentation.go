@@ -40,9 +40,12 @@ func sessionActivityDescription(row sessionRow, width int) string {
 	}
 	primary := styFullSnapshot.Render("full snapshot " + relTime(row.activity.LatestFullAt.Local()))
 	if row.running {
+		agents, workspaces := row.activity.LiveAgents, row.activity.LiveWorkspaces
+		if row.liveAgents >= 0 {
+			agents, workspaces = row.liveAgents, row.liveWorkspaces
+		}
 		current := styCurrentActivity.Render(fmt.Sprintf("current %d %s, %d %s",
-			row.activity.LiveAgents, plural(row.activity.LiveAgents, "agent"),
-			row.activity.LiveWorkspaces, plural(row.activity.LiveWorkspaces, "space")))
+			agents, plural(agents, "agent"), workspaces, plural(workspaces, "space")))
 		primary += styDim.Render(" · ") + current
 	}
 	if row.activity.ArchivedAgents == 0 {

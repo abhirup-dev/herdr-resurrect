@@ -86,19 +86,22 @@ type Split struct {
 // agent name when present, else the pane id. Pane IDs are never reused by
 // herdr and are informational only.
 type Pane struct {
-	Key       string            `json:"key"`
-	PaneID    string            `json:"pane_id"`         // informational, never identity
-	Agent     string            `json:"agent,omitempty"` // detected kind (claude, codex, pi...)
-	Name      string            `json:"name,omitempty"`  // herdr agent name
-	State     string            `json:"state,omitempty"`
-	Title     string            `json:"title,omitempty"` // terminal title at capture (icon source)
-	SID       string            `json:"sid,omitempty"`   // native session reference
-	SIDSource string            `json:"sid_source,omitempty"`
-	Cwd       string            `json:"cwd"`
-	Argv      []string          `json:"argv,omitempty"` // foreground process argv
-	Cmdline   string            `json:"cmdline,omitempty"`
-	Shell     bool              `json:"shell,omitempty"` // no agent: comes back as a shell at cwd
-	Env       map[string]string `json:"env,omitempty"`   // faithful live env (secrets; 0600)
+	Key       string   `json:"key"`
+	PaneID    string   `json:"pane_id"`         // informational, never identity
+	Agent     string   `json:"agent,omitempty"` // detected kind (claude, codex, pi...)
+	Name      string   `json:"name,omitempty"`  // herdr agent name
+	State     string   `json:"state,omitempty"`
+	Title     string   `json:"title,omitempty"` // terminal title at capture (icon source)
+	SID       string   `json:"sid,omitempty"`   // native session reference
+	SIDSource string   `json:"sid_source,omitempty"`
+	Cwd       string   `json:"cwd"`
+	Argv      []string `json:"argv,omitempty"` // foreground process argv
+	Cmdline   string   `json:"cmdline,omitempty"`
+	// Shell means a non-agent foreground command is running, or no
+	// foreground process was identifiable. An idle shell has Shell == false;
+	// use planner.ReusableShellPane before launching into a live pane.
+	Shell bool              `json:"shell,omitempty"`
+	Env   map[string]string `json:"env,omitempty"` // faithful live env (secrets; 0600)
 }
 
 // DefaultRoot is the canonical archive tree, independent of entrypoint

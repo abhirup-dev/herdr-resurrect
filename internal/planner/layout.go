@@ -104,11 +104,16 @@ func buildLayoutTree(panes []geometryPane, splits []manifest.Split) *layoutTree 
 		if len(first) == 0 || len(second) == 0 {
 			continue
 		}
+		firstTree := buildLayoutTree(first, splits)
+		secondTree := buildLayoutTree(second, splits)
+		if firstTree == nil || secondTree == nil {
+			return nil
+		}
 		return &layoutTree{
 			direction: normalizedDirection(split.Direction),
 			ratio:     normalizedRatio(split.Ratio),
-			first:     buildLayoutTree(first, splits),
-			second:    buildLayoutTree(second, splits),
+			first:     firstTree,
+			second:    secondTree,
 		}
 	}
 	return nil

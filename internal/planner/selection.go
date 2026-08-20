@@ -37,6 +37,65 @@ func SelectWhole(workspace manifest.Workspace) Selection {
 	return selection
 }
 
+// SelectSnapshot selects every pane represented by a live snapshot.
+func SelectSnapshot(snapshot *manifest.Snapshot) Selection {
+	selection := Selection{}
+	if snapshot == nil {
+		return selection
+	}
+	for _, workspace := range snapshot.Workspaces {
+		for _, key := range PaneKeys(workspace) {
+			selection[key] = true
+		}
+	}
+	return selection
+}
+
+// SnapshotSelectedCount reports selected and total panes across a snapshot.
+func SnapshotSelectedCount(snapshot *manifest.Snapshot, selection Selection) (selected, total int) {
+	if snapshot == nil {
+		return 0, 0
+	}
+	for _, workspace := range snapshot.Workspaces {
+		count, workspaceTotal := SelectedCount(workspace, selection)
+		selected += count
+		total += workspaceTotal
+	}
+	return selected, total
+}
+
+// SelectedPaneIDs returns selected pane ids in snapshot topology order.
+func SelectedPaneIDs(snapshot *manifest.Snapshot, selection Selection) []string {
+	if snapshot == nil {
+		return nil
+	}
+	var paneIDs []string
+	for _, workspace := range snapshot.Workspaces {
+		for _, tab := range workspace.Tabs {
+			for _, pane := range tab.Panes {
+				if selection[pane.Key] {
+					paneIDs = append(paneIDs, pane.PaneID)
+				}
+			}
+		}
+	}
+	return paneIDs
+}
+
+// ToggleWorkspace follows the shared tri-state policy: partial selects all;
+// full clears all.
+func ToggleWorkspace(workspace manifest.Workspace, selection Selection) {
+	selected, total := SelectedCount(workspace, selection)
+	selectAll := selected != total
+	for _, key := range PaneKeys(workspace) {
+		if selectAll {
+			selection[key] = true
+		} else {
+			delete(selection, key)
+		}
+	}
+}
+
 // MapMatching carries selected pane identities into another snapshot target.
 // Entries absent from the new target are dropped; new entries stay unselected.
 func MapMatching(previous Selection, workspace manifest.Workspace) Selection {
