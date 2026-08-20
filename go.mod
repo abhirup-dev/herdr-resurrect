@@ -1,4 +1,4 @@
-module github.com/abhirupdas/herdr-archive
+module github.com/abhirup-dev/herdr-resurrect
 
 go 1.26
 

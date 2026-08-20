@@ -1,4 +1,4 @@
-// Package manifest defines the herdr-archive snapshot format and its
+// Package manifest defines the herdr-resurrect snapshot format and its
 // resurrect-style storage: an append-only directory of timestamped JSON
 // files with a repointable `last` symlink for point-in-time restore.
 package manifest

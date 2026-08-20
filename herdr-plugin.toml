@@ -1,5 +1,5 @@
-id = "herdr-archive"
-name = "Herdr Archive"
+id = "herdr-resurrect"
+name = "Herdr Resurrect"
 version = "0.1.0"
 min_herdr_version = "0.8.0"
 description = "tmux-resurrect for herdr: capture, archive, and env-faithfully resume sessions, workspaces, and agents."
@@ -7,17 +7,17 @@ platforms = ["macos", "linux"]
 
 # plugin link does not run build commands; local authors build themselves.
 [[build]]
-command = ["go", "build", "-o", "bin/herdr-archive", "."]
+command = ["go", "build", "-o", "bin/herdr-resurrect", "."]
 
 [[actions]]
 id = "ping"
-title = "herdr-archive smoke test (dump plugin context)"
+title = "herdr-resurrect smoke test (dump plugin context)"
 contexts = ["global"]
-command = ["./bin/herdr-archive", "action", "ping"]
+command = ["./bin/herdr-resurrect", "action", "ping"]
 
 [[actions]]
 id = "open-browser"
-title = "Open Herdr Archive"
+title = "Open Herdr Resurrect"
 description = "Open the session archive and additive restoration planner."
 contexts = ["global"]
 command = ["bash", "scripts/open-browser.sh"]
@@ -30,14 +30,14 @@ contexts = ["global"]
 command = ["bash", "scripts/open-stop.sh"]
 
 # The interactive browser. Opens as a session-modal popup; closes when the
-# TUI exits. Also available as a plain verb: `herdr-archive browse`.
+# TUI exits. Also available as a plain verb: `herdr-resurrect browse`.
 [[panes]]
 id = "browser"
-title = "herdr-archive"
+title = "herdr-resurrect"
 placement = "popup"
 width = "90%"
 height = "80%"
-command = ["./bin/herdr-archive", "browse"]
+command = ["./bin/herdr-resurrect", "browse"]
 
 [[panes]]
 id = "stop-current"
@@ -45,4 +45,4 @@ title = "capture & stop session"
 placement = "popup"
 width = "90%"
 height = "80%"
-command = ["./bin/herdr-archive", "browse", "--stop-current"]
+command = ["./bin/herdr-resurrect", "browse", "--stop-current"]

@@ -4,8 +4,8 @@ import (
 	"math"
 	"reflect"
 
-	"github.com/abhirupdas/herdr-archive/internal/manifest"
-	"github.com/abhirupdas/herdr-archive/internal/strategy"
+	"github.com/abhirup-dev/herdr-resurrect/internal/manifest"
+	"github.com/abhirup-dev/herdr-resurrect/internal/strategy"
 )
 
 // ExactWorkspaceMatch reports whether a captured workspace is represented by

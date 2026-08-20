@@ -6,9 +6,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/abhirupdas/herdr-archive/internal/capture"
-	"github.com/abhirupdas/herdr-archive/internal/manifest"
-	"github.com/abhirupdas/herdr-archive/internal/planner"
+	"github.com/abhirup-dev/herdr-resurrect/internal/capture"
+	"github.com/abhirup-dev/herdr-resurrect/internal/manifest"
+	"github.com/abhirup-dev/herdr-resurrect/internal/planner"
 )
 
 type captureLiveMsg struct {

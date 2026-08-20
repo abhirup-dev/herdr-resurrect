@@ -20,15 +20,15 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/abhirupdas/herdr-archive/internal/activity"
-	archiveop "github.com/abhirupdas/herdr-archive/internal/archive"
-	"github.com/abhirupdas/herdr-archive/internal/brands"
-	"github.com/abhirupdas/herdr-archive/internal/capture"
-	"github.com/abhirupdas/herdr-archive/internal/kitty"
-	"github.com/abhirupdas/herdr-archive/internal/manifest"
-	"github.com/abhirupdas/herdr-archive/internal/planner"
-	"github.com/abhirupdas/herdr-archive/internal/resume"
-	"github.com/abhirupdas/herdr-archive/internal/strategy"
+	"github.com/abhirup-dev/herdr-resurrect/internal/activity"
+	archiveop "github.com/abhirup-dev/herdr-resurrect/internal/archive"
+	"github.com/abhirup-dev/herdr-resurrect/internal/brands"
+	"github.com/abhirup-dev/herdr-resurrect/internal/capture"
+	"github.com/abhirup-dev/herdr-resurrect/internal/kitty"
+	"github.com/abhirup-dev/herdr-resurrect/internal/manifest"
+	"github.com/abhirup-dev/herdr-resurrect/internal/planner"
+	"github.com/abhirup-dev/herdr-resurrect/internal/resume"
+	"github.com/abhirup-dev/herdr-resurrect/internal/strategy"
 )
 
 type mode int
@@ -167,6 +167,13 @@ type Options struct {
 	StopCurrent bool
 }
 
+func forceImages() bool {
+	if value, set := os.LookupEnv("HERDR_RESURRECT_FORCE_IMAGES"); set {
+		return value == "1"
+	}
+	return os.Getenv("HERDR_ARCHIVE_FORCE_IMAGES") == "1"
+}
+
 func Run(options Options) error {
 	captureInput := textinput.New()
 	captureInput.Placeholder = "optional — defaults to date and time"
@@ -220,8 +227,9 @@ func Run(options Options) error {
 	// Inside a herdr pane the multiplexer eats the graphics protocol (its
 	// experimental kitty_graphics flag does not forward pane graphics in
 	// 0.8.x), so placeholders would render as blank cells — glyphs there.
-	// HERDR_ARCHIVE_FORCE_IMAGES=1 overrides for testing a future herdr.
-	if kitty.Capable() && (os.Getenv("HERDR_ENV") != "1" || os.Getenv("HERDR_ARCHIVE_FORCE_IMAGES") == "1") {
+	// HERDR_RESURRECT_FORCE_IMAGES=1 overrides for testing a future herdr.
+	// HERDR_ARCHIVE_FORCE_IMAGES remains a deprecated compatibility alias.
+	if kitty.Capable() && (os.Getenv("HERDR_ENV") != "1" || forceImages()) {
 		icons = kitty.Setup(os.Stdout, brands.Logo, brands.Kinds)
 		defer fmt.Fprint(os.Stdout, kitty.DeleteAll())
 	}
@@ -1642,7 +1650,7 @@ func (m *model) previewLines() []string {
 // ---- chrome -------------------------------------------------------------
 
 func (m *model) title() string {
-	base := styTitle.Render("herdr-archive")
+	base := styTitle.Render("herdr-resurrect")
 	if m.namingCapture {
 		return base + styDim.Render("  › name capture")
 	}
@@ -1812,7 +1820,7 @@ func (m *model) View() tea.View {
 		Render(fitBlock(m.render(), contentWidth))
 	view := tea.NewView(content)
 	view.AltScreen = true
-	view.WindowTitle = "herdr-archive"
+	view.WindowTitle = "herdr-resurrect"
 	return view
 }
 

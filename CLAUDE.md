@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`herdr-archive` captures a running [herdr](https://herdr.dev) session (workspaces, tabs, panes,
+`herdr-resurrect` captures a running [herdr](https://herdr.dev) session (workspaces, tabs, panes,
 agents) to a JSON snapshot and restores it **additively**. It exists because herdr's native restore
 relaunches an agent as bare `claude --resume <id>` with no environment, so every env-based launcher
 (glm → z.ai, grok → local proxy) silently comes back as the wrong provider. This tool captures the
@@ -17,9 +17,9 @@ archive tree and one code path — never let them diverge on defaults.
 ## Commands
 
 ```sh
-make build          # -> ./bin/herdr-archive
+make build          # -> ./bin/herdr-resurrect
 make check          # go test ./... + go vet ./...
-make install        # build + install CLI + link plugin + add `prefix + R` keybinding
+make install        # build + install CLI + link plugin + add browser and stop keybindings
 make help           # all targets; PREFIX, BINDIR, GO, HERDR, HERDR_CONFIG_PATH are overridable
 ```
 
@@ -30,12 +30,12 @@ gofmt -l .          # must be silent
 git diff --check
 ```
 
-### There are no tests
+### Test coverage
 
-The repo contains zero `_test.go` files, by the owner's explicit direction: acceptance testing is
-done by driving a real herdr session rather than accumulating scaffolding. So `go test ./...`
-(and therefore `make check`) proves only that the packages compile. **Never cite it as behavioural
-verification.** If you add a test, ask first.
+`internal/planner` and `internal/strategy` contain focused behavioral tests; most other packages
+still report `[no test files]`. `make check` runs the available tests, but green does not imply
+whole-project behavioral coverage. Add focused tests for pure logic and still verify mutating or
+interactive behavior against an isolated live session.
 
 ### Verifying against a live session
 

@@ -1,4 +1,4 @@
-// herdr-archive — tmux-resurrect-style capture and env-faithful replay for
+// herdr-resurrect — tmux-resurrect-style capture and env-faithful replay for
 // herdr sessions, workspaces, and agents.
 //
 // Design invariants:
@@ -14,20 +14,20 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/abhirupdas/herdr-archive/internal/tui"
+	"github.com/abhirup-dev/herdr-resurrect/internal/tui"
 )
 
-const usage = `herdr-archive — capture, archive, and resume herdr sessions env-faithfully
+const usage = `herdr-resurrect — capture, archive, and resume herdr sessions env-faithfully
 
 usage:
-  herdr-archive capture  [--session NAME] [--workspace ID] [--pane ID]  write a snapshot
-  herdr-archive archive  --session NAME [--force] [--yes]                capture + stop
-  herdr-archive resume   <session-or-snapshot> [selectors]   attach + verify + sweep
-  herdr-archive park     --workspace <ID> [--session NAME]   capture + workspace close
-  herdr-archive unpark   --from <manifest> [--into SESSION]  recreate workspace + relaunch
-  herdr-archive status   [--all]                             audit live vs manifests
-  herdr-archive browse                                       snapshot picker TUI
-  herdr-archive action   <id>                                plugin action entrypoint
+  herdr-resurrect capture  [--session NAME] [--workspace ID] [--pane ID]  write a snapshot
+  herdr-resurrect archive  --session NAME [--force] [--yes]                capture + stop
+  herdr-resurrect resume   <session-or-snapshot> [selectors]   attach + verify + sweep
+  herdr-resurrect park     --workspace <ID> [--session NAME]   capture + workspace close
+  herdr-resurrect unpark   --from <manifest> [--into SESSION]  recreate workspace + relaunch
+  herdr-resurrect status   [--all]                             audit live vs manifests
+  herdr-resurrect browse                                       snapshot picker TUI
+  herdr-resurrect action   <id>                                plugin action entrypoint
 
 selectors: --workspace ID | --tab ID | --agent NAME   (partial resume)
 all mutating verbs are dry-run unless --yes

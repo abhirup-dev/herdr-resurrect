@@ -4,7 +4,7 @@ import (
 	"math"
 	"sort"
 
-	"github.com/abhirupdas/herdr-archive/internal/manifest"
+	"github.com/abhirup-dev/herdr-resurrect/internal/manifest"
 )
 
 type layoutTree struct {

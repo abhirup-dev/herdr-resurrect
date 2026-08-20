@@ -1,5 +1,5 @@
 // Package kitty speaks the slice of the kitty terminal graphics protocol
-// herdr-archive needs: transmit PNGs quietly (a=t, q=2), create virtual
+// herdr-resurrect needs: transmit PNGs quietly (a=t, q=2), create virtual
 // placements (a=p, U=1), and render unicode-placeholder cells — U+10EEEE +
 // row diacritics + the image id encoded as a 256-color foreground — as plain
 // styled text. Placeholder cells are ordinary text, so bubbletea's renderer

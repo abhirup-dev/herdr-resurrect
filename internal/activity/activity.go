@@ -5,7 +5,7 @@ package activity
 import (
 	"time"
 
-	"github.com/abhirupdas/herdr-archive/internal/manifest"
+	"github.com/abhirup-dev/herdr-resurrect/internal/manifest"
 )
 
 // Summary is presentation-neutral Level 1 activity data.

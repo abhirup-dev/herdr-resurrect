@@ -5,8 +5,10 @@ GOFMT ?= gofmt
 HERDR ?= herdr
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
-BINARY := bin/herdr-archive
-INSTALLED_BINARY := $(BINDIR)/herdr-archive
+BINARY := bin/herdr-resurrect
+INSTALLED_BINARY := $(BINDIR)/herdr-resurrect
+LEGACY_BINARY := bin/herdr-archive
+LEGACY_INSTALLED_BINARY := $(BINDIR)/herdr-archive
 
 .DEFAULT_GOAL := help
 
@@ -14,13 +16,13 @@ INSTALLED_BINARY := $(BINDIR)/herdr-archive
 
 help:
 	@printf '%s\n' \
-	  'make build              Build bin/herdr-archive' \
+	  'make build              Build bin/herdr-resurrect' \
 	  'make format             Format all Go source files' \
 	  'make check              Check formatting, compile packages, and run go vet' \
-	  'make install            Install CLI, link plugin, and add prefix+R' \
+	  'make install            Install CLI, link plugin, and add both keybindings' \
 	  'make install-cli        Install the CLI under $(BINDIR)' \
 	  'make install-plugin     Build and link this checkout into Herdr' \
-	  'make install-keybinding Add prefix+R to the Herdr config once' \
+	  'make install-keybinding Add both bindings to the Herdr config once' \
 	  'make clean              Remove the local build artifact' \
 	  '' \
 	  'Overrides: PREFIX=… BINDIR=… GO=… GOFMT=… HERDR=… HERDR_CONFIG_PATH=…'
@@ -42,7 +44,7 @@ check:
 	$(GO) vet ./...
 
 install: install-cli install-plugin install-keybinding
-	@printf 'herdr-archive installed: %s\n' "$(INSTALLED_BINARY)"
+	@printf 'herdr-resurrect installed: %s\n' "$(INSTALLED_BINARY)"
 
 install-cli: build
 	install -d "$(BINDIR)"
@@ -51,12 +53,21 @@ install-cli: build
 	else \
 	  install -m 0755 "$(BINARY)" "$(INSTALLED_BINARY)"; \
 	fi
+	@if [[ -e "$(LEGACY_INSTALLED_BINARY)" ]]; then \
+	  if [[ -e "$(LEGACY_BINARY)" ]] && cmp -s "$(LEGACY_INSTALLED_BINARY)" "$(LEGACY_BINARY)"; then \
+	    rm -f "$(LEGACY_INSTALLED_BINARY)"; \
+	    printf 'Removed superseded CLI: %s\n' "$(LEGACY_INSTALLED_BINARY)"; \
+	  else \
+	    printf 'Legacy CLI differs and was left untouched: %s\n' "$(LEGACY_INSTALLED_BINARY)"; \
+	  fi; \
+	fi
 
 install-plugin: build
+	@$(HERDR) plugin unlink herdr-archive >/dev/null 2>&1 || true
 	$(HERDR) plugin link "$(CURDIR)"
 
 install-keybinding:
 	HERDR_BIN_PATH="$(HERDR)" HERDR_CONFIG_PATH="$(HERDR_CONFIG_PATH)" scripts/install-keybinding.sh
 
 clean:
-	rm -f "$(BINARY)"
+	rm -f "$(BINARY)" "$(LEGACY_BINARY)"

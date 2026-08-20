@@ -13,7 +13,7 @@ import (
 // carries invocation context.
 func action(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: herdr-archive action <id>")
+		fmt.Fprintln(os.Stderr, "usage: herdr-resurrect action <id>")
 		return 2
 	}
 	switch args[0] {
@@ -37,7 +37,7 @@ func actionPing() int {
 		}
 	}
 	sort.Strings(keys)
-	fmt.Println("herdr-archive pong")
+	fmt.Println("herdr-resurrect pong")
 	if ctx := os.Getenv("HERDR_PLUGIN_CONTEXT_JSON"); ctx != "" {
 		var pretty map[string]any
 		if err := json.Unmarshal([]byte(ctx), &pretty); err == nil {

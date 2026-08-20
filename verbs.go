@@ -7,12 +7,12 @@ import (
 	"strings"
 	"time"
 
-	archiveop "github.com/abhirupdas/herdr-archive/internal/archive"
-	"github.com/abhirupdas/herdr-archive/internal/capture"
-	"github.com/abhirupdas/herdr-archive/internal/herdr"
-	"github.com/abhirupdas/herdr-archive/internal/manifest"
-	"github.com/abhirupdas/herdr-archive/internal/planner"
-	"github.com/abhirupdas/herdr-archive/internal/resume"
+	archiveop "github.com/abhirup-dev/herdr-resurrect/internal/archive"
+	"github.com/abhirup-dev/herdr-resurrect/internal/capture"
+	"github.com/abhirup-dev/herdr-resurrect/internal/herdr"
+	"github.com/abhirup-dev/herdr-resurrect/internal/manifest"
+	"github.com/abhirup-dev/herdr-resurrect/internal/planner"
+	"github.com/abhirup-dev/herdr-resurrect/internal/resume"
 )
 
 type stringsArg []string

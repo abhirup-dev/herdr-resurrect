@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/abhirupdas/herdr-archive/internal/capture"
-	"github.com/abhirupdas/herdr-archive/internal/herdr"
-	"github.com/abhirupdas/herdr-archive/internal/manifest"
-	"github.com/abhirupdas/herdr-archive/internal/strategy"
+	"github.com/abhirup-dev/herdr-resurrect/internal/capture"
+	"github.com/abhirup-dev/herdr-resurrect/internal/herdr"
+	"github.com/abhirup-dev/herdr-resurrect/internal/manifest"
+	"github.com/abhirup-dev/herdr-resurrect/internal/strategy"
 )
 
 type Action string

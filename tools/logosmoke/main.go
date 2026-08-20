@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/abhirupdas/herdr-archive/internal/brands"
-	"github.com/abhirupdas/herdr-archive/internal/kitty"
+	"github.com/abhirup-dev/herdr-resurrect/internal/brands"
+	"github.com/abhirup-dev/herdr-resurrect/internal/kitty"
 	"github.com/charmbracelet/x/ansi"
 )
 

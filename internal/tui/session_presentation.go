@@ -38,11 +38,13 @@ func sessionActivityDescription(row sessionRow, width int) string {
 	if row.activity.LatestFullAt.IsZero() {
 		return styFullSnapshot.Render("no full snapshot")
 	}
-	full := styFullSnapshot.Render("full snapshot " + relTime(row.activity.LatestFullAt.Local()))
-	current := styCurrentActivity.Render(fmt.Sprintf("current %d %s, %d %s",
-		row.activity.LiveAgents, plural(row.activity.LiveAgents, "agent"),
-		row.activity.LiveWorkspaces, plural(row.activity.LiveWorkspaces, "space")))
-	primary := full + styDim.Render(" · ") + current
+	primary := styFullSnapshot.Render("full snapshot " + relTime(row.activity.LatestFullAt.Local()))
+	if row.running {
+		current := styCurrentActivity.Render(fmt.Sprintf("current %d %s, %d %s",
+			row.activity.LiveAgents, plural(row.activity.LiveAgents, "agent"),
+			row.activity.LiveWorkspaces, plural(row.activity.LiveWorkspaces, "space")))
+		primary += styDim.Render(" · ") + current
+	}
 	if row.activity.ArchivedAgents == 0 {
 		return primary
 	}

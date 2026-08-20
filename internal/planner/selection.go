@@ -1,7 +1,7 @@
 // Package planner owns restoration selection semantics shared by the CLI and TUI.
 package planner
 
-import "github.com/abhirupdas/herdr-archive/internal/manifest"
+import "github.com/abhirup-dev/herdr-resurrect/internal/manifest"
 
 // Selection is the set of captured pane identities included in a restoration.
 type Selection map[string]bool

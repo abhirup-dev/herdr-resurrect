@@ -1,4 +1,4 @@
-# herdr-archive
+# herdr-resurrect
 
 tmux-resurrect for [herdr](https://herdr.dev): capture, archive, and
 env-faithfully resume herdr sessions, workspaces, and agents. A herdr plugin
@@ -13,7 +13,7 @@ grok → local proxy, …) comes back as the wrong provider, silently, or as a
 dead shell. tmux-resurrect has carried the same gap for years
 ([#109](https://github.com/tmux-plugins/tmux-resurrect/issues/109)).
 
-herdr-archive captures the pane's **live environment** (`ps Ewww`) and
+herdr-resurrect captures the pane's **live environment** (`ps Ewww`) and
 replays stable configuration without needing to understand the launcher.
 Provider credentials, model mappings, and ordinary user settings survive;
 per-process terminal state does not. This deliberately excludes `HERDR_*`,
@@ -28,7 +28,7 @@ From this checkout:
 make install
 ```
 
-This builds the binary, installs the CLI to `~/.local/bin/herdr-archive`, links
+This builds the binary, installs the CLI to `~/.local/bin/herdr-resurrect`, links
 the checkout as a local Herdr plugin, and adds the `prefix + R` browser and
 `prefix + Alt-Q` capture-and-stop keybindings once.
 Use `make help` for separate build, check, CLI, plugin, and keybinding targets.
@@ -37,11 +37,11 @@ Use `make help` for separate build, check, CLI, plugin, and keybinding targets.
 ## Verbs
 
 ```
-herdr-archive capture  [--session N] [--workspace ID] [--pane ID] [--name TEXT]
-herdr-archive archive  --session N [--name TEXT] [--force] [--yes]
-herdr-archive resume   --session N [selectors] [--yes]
-herdr-archive park     --workspace ID [--session N] [--name TEXT] [--yes]
-herdr-archive unpark   [selectors] [--session N] [--into N] [--yes]
+herdr-resurrect capture  [--session N] [--workspace ID] [--pane ID] [--name TEXT]
+herdr-resurrect archive  --session N [--name TEXT] [--force] [--yes]
+herdr-resurrect resume   --session N [selectors] [--yes]
+herdr-resurrect park     --workspace ID [--session N] [--name TEXT] [--yes]
+herdr-resurrect unpark   [selectors] [--session N] [--into N] [--yes]
 selectors: --workspace | --tab | --agent   (partial resume)
 ```
 
@@ -116,8 +116,8 @@ untouched.
 ## Browsing (TUI)
 
 ```
-herdr-archive browse                                  # any terminal
-herdr plugin pane open --plugin herdr-archive --entrypoint browser
+herdr-resurrect browse                                  # any terminal
+herdr plugin pane open --plugin herdr-resurrect --entrypoint browser
                                                       # popup inside herdr
 ```
 
@@ -129,9 +129,10 @@ Sessions
        └─ captured workspace tree + hierarchical subset selection
 ```
 
-Level 1 summarizes full snapshots as `full snapshot T · current X agents, Y
-spaces`. It also compares the latest full snapshot with the largest full snapshot
-from the previous seven days using a swappable archived-state strategy. Positive
+Level 1 summarizes running sessions as `full snapshot T · current X agents, Y
+spaces`; stopped sessions omit the current segment. It also compares the latest
+full snapshot with the largest full snapshot from the previous seven days using
+a swappable archived-state strategy. Positive
 per-space count differences render as `archived X agents, Y spaces (since T)`;
 curated captures do not participate. The metadata stays inline when it fits and
 wraps to an indented ghosted line otherwise.
@@ -198,8 +199,9 @@ images and unicode placeholders both: escapes consumed, zero image
 pixels on screen, confirmed by an independent vision model reading a
 screenshot). So `browse` detects `HERDR_ENV=1` and falls back to the
 colored glyphs — placeholders would otherwise render as blank cells.
-`HERDR_ARCHIVE_FORCE_IMAGES=1` overrides, for testing against a future
-herdr that forwards pane graphics. Outside herdr panes (any terminal
+`HERDR_RESURRECT_FORCE_IMAGES=1` overrides, for testing against a future
+herdr that forwards pane graphics. `HERDR_ARCHIVE_FORCE_IMAGES` remains a
+deprecated compatibility alias. Outside herdr panes (any terminal
 that speaks kitty graphics natively — Ghostty, kitty), images render
 for real.
 
@@ -212,13 +214,13 @@ stop popups. `make install` adds both bindings:
 [[keys.command]]
 key = "prefix+shift+r"
 type = "plugin_action"
-command = "herdr-archive.open-browser"
-description = "open herdr archive"
+command = "herdr-resurrect.open-browser"
+description = "open Herdr Resurrect"
 
 [[keys.command]]
 key = "prefix+alt+q"
 type = "plugin_action"
-command = "herdr-archive.stop-current"
+command = "herdr-resurrect.stop-current"
 description = "capture and stop current session"
 ```
 
