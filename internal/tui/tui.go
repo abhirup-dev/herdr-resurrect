@@ -20,6 +20,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/abhirupdas/herdr-archive/internal/activity"
 	archiveop "github.com/abhirupdas/herdr-archive/internal/archive"
 	"github.com/abhirupdas/herdr-archive/internal/brands"
 	"github.com/abhirupdas/herdr-archive/internal/capture"
@@ -43,12 +44,13 @@ const (
 )
 
 type sessionRow struct {
-	name    string
-	running bool
-	snaps   []string
-	last    string
-	latest  *manifest.Snapshot
-	agents  int
+	name     string
+	running  bool
+	snaps    []string
+	last     string
+	latest   *manifest.Snapshot
+	agents   int
+	activity activity.Summary
 
 	// staleness, computed against the live session: how many agents the
 	// latest snapshot names are still alive (liveAgents == -1 = unknown,
@@ -91,54 +93,55 @@ type planData struct {
 }
 
 type model struct {
-	mode              mode
-	width             int
-	height            int
-	sessions          []sessionRow
-	snaps             []snapshotRow
-	targets           []workspaceTarget
-	workspacePlan     map[string]workspaceSelection
-	live              *manifest.Snapshot
-	compiled          *planner.Plan
-	plannerCursor     int
-	plannerScroll     int
-	inspectTarget     workspaceTarget
-	inspectCursor     int
-	inspectScroll     int
-	inspectPreview    bool
-	sessList          list.Model
-	snapList          list.Model
-	planList          list.Model
-	captureInput      textinput.Model
-	captureSession    string
-	captureSessions   []string
-	captureLive       *manifest.Snapshot
-	captureSelection  planner.Selection
-	captureCursor     int
-	captureScroll     int
-	captureReturnMode mode
-	namingCapture     bool
-	archiveLive       *manifest.Snapshot
-	archiveName       string
-	archivePath       string
-	archivePreSaved   bool
-	archiveReused     bool
-	archivePreview    bool
-	archiveScroll     int
-	startupCmd        tea.Cmd
-	stopCurrentMode   bool
-	spin              spinner.Model
-	spinning          bool
-	preview           bool
-	previewCursor     int
-	previewScroll     int
-	confirm           string
-	confirmScroll     int
-	cur               *sessionRow
-	curSnap           string
-	plan              *planData
-	note              string
-	err               error
+	mode                         mode
+	width                        int
+	height                       int
+	sessions                     []sessionRow
+	archivedStateSummaryStrategy activity.ArchivedStateSummaryStrategy
+	snaps                        []snapshotRow
+	targets                      []workspaceTarget
+	workspacePlan                map[string]workspaceSelection
+	live                         *manifest.Snapshot
+	compiled                     *planner.Plan
+	plannerCursor                int
+	plannerScroll                int
+	inspectTarget                workspaceTarget
+	inspectCursor                int
+	inspectScroll                int
+	inspectPreview               bool
+	sessList                     list.Model
+	snapList                     list.Model
+	planList                     list.Model
+	captureInput                 textinput.Model
+	captureSession               string
+	captureSessions              []string
+	captureLive                  *manifest.Snapshot
+	captureSelection             planner.Selection
+	captureCursor                int
+	captureScroll                int
+	captureReturnMode            mode
+	namingCapture                bool
+	archiveLive                  *manifest.Snapshot
+	archiveName                  string
+	archivePath                  string
+	archivePreSaved              bool
+	archiveReused                bool
+	archivePreview               bool
+	archiveScroll                int
+	startupCmd                   tea.Cmd
+	stopCurrentMode              bool
+	spin                         spinner.Model
+	spinning                     bool
+	preview                      bool
+	previewCursor                int
+	previewScroll                int
+	confirm                      string
+	confirmScroll                int
+	cur                          *sessionRow
+	curSnap                      string
+	plan                         *planData
+	note                         string
+	err                          error
 }
 
 type planMsg struct {
@@ -173,11 +176,12 @@ func Run(options Options) error {
 	spin := spinner.New(spinner.WithSpinner(spinner.Dot))
 	spin.Style = styTitle
 	m := &model{
-		width:         96,
-		height:        24,
-		spin:          spin,
-		captureInput:  captureInput,
-		workspacePlan: map[string]workspaceSelection{},
+		width:                        96,
+		height:                       24,
+		spin:                         spin,
+		captureInput:                 captureInput,
+		archivedStateSummaryStrategy: &activity.RecentPeak{Window: 7 * 24 * time.Hour},
+		workspacePlan:                map[string]workspaceSelection{},
 	}
 	if err := m.loadSessions(); err != nil {
 		return err
@@ -185,7 +189,7 @@ func Run(options Options) error {
 	if len(m.sessions) == 0 {
 		return fmt.Errorf("no herdr sessions found")
 	}
-	m.sessList = newList()
+	m.sessList = newSessionList()
 	m.snapList = newSnapshotList()
 	m.planList = newList()
 	m.planList.SetFilteringEnabled(false)
@@ -247,6 +251,15 @@ func newList() list.Model {
 	return l
 }
 
+func newSessionList() list.Model {
+	l := list.New([]list.Item{}, newSessionDelegate(false), 88, 10)
+	l.SetShowTitle(false)
+	l.SetShowStatusBar(false)
+	l.SetShowHelp(false)
+	l.SetFilteringEnabled(true)
+	return l
+}
+
 func newSnapshotList() list.Model {
 	delegate := list.NewDefaultDelegate()
 	delegate.Styles = archiveItemStyles()
@@ -263,9 +276,10 @@ func newSnapshotList() list.Model {
 func (m *model) setListBackground(_ bool) {
 	styles := archiveItemStyles()
 
+	m.sessList.SetDelegate(newSessionDelegate(sessionRowsWrap(m.sessions, m.sessList.Width())))
+
 	standard := list.NewDefaultDelegate()
 	standard.Styles = styles
-	m.sessList.SetDelegate(standard)
 	m.planList.SetDelegate(standard)
 
 	snapshots := list.NewDefaultDelegate()
@@ -294,6 +308,7 @@ func (m *model) loadSessions() error {
 		sess = append(sess, capture.SessionInfo{Name: e.Name()})
 	}
 	m.sessions = nil
+	now := time.Now()
 	for i := range sess {
 		row := sessionRow{name: sess[i].Name, running: sess[i].Running, liveAgents: -1}
 		dir := manifest.Dir("", row.name)
@@ -301,11 +316,21 @@ func (m *model) loadSessions() error {
 		matches, _ := filepath.Glob(filepath.Join(dir, "herdr_*.json"))
 		sort.Sort(sort.Reverse(sort.StringSlice(matches)))
 		row.snaps = matches
-		if len(matches) > 0 {
-			if snap, err := manifest.Load(matches[0]); err == nil {
-				row.latest, row.agents = snap, len(snap.AgentPanes())
+		var history []*manifest.Snapshot
+		for _, path := range matches {
+			snapshot, err := manifest.Load(path)
+			if err != nil {
+				continue
+			}
+			history = append(history, snapshot)
+			if snapshot.CaptureScope == nil && (row.latest == nil || snapshot.CreatedAt.After(row.latest.CreatedAt)) {
+				row.latest = snapshot
 			}
 		}
+		if m.archivedStateSummaryStrategy != nil {
+			row.activity = m.archivedStateSummaryStrategy.Summarize(history, now)
+		}
+		row.agents = row.activity.LiveAgents
 		if row.running && row.latest != nil {
 			if live, err := capture.LiveAgents(row.name); err == nil {
 				row.liveAgents = 0
@@ -491,7 +516,10 @@ func captureSessionsCmd(sessions []string, name string, paneIDs []string) tea.Cm
 
 // ---- list sync ---------------------------------------------------------
 
-type sessionItem struct{ row sessionRow }
+type sessionItem struct {
+	row   sessionRow
+	width int
+}
 
 func (i sessionItem) Title() string {
 	badge := styBad.Render("stopped")
@@ -504,11 +532,7 @@ func (i sessionItem) Title() string {
 	return fmt.Sprintf("%s  %s", i.row.name, badge)
 }
 func (i sessionItem) Description() string {
-	if i.row.latest == nil {
-		return "0 agents"
-	}
-	return fmt.Sprintf("%s · %d %s",
-		relTime(i.row.latest.CreatedAt.Local()), i.row.agents, plural(i.row.agents, "agent"))
+	return sessionActivityDescription(i.row, i.width)
 }
 
 // stale: the server is up but captured agents have been closed.
@@ -562,9 +586,11 @@ func (i snapshotItem) FilterValue() string {
 }
 
 func (m *model) syncSessionList() {
+	width := m.sessList.Width()
+	m.sessList.SetDelegate(newSessionDelegate(sessionRowsWrap(m.sessions, width)))
 	items := make([]list.Item, 0, len(m.sessions))
 	for _, s := range m.sessions {
-		items = append(items, sessionItem{row: s})
+		items = append(items, sessionItem{row: s, width: width})
 	}
 	m.sessList.SetItems(items)
 }
@@ -1878,6 +1904,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessList.SetSize(w, h)
 		m.snapList.SetSize(w, h)
 		m.planList.SetSize(w, h)
+		m.syncSessionList()
 		return m, nil
 	case spinner.TickMsg:
 		if m.spinning {

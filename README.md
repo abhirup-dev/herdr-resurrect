@@ -129,6 +129,13 @@ Sessions
        └─ captured workspace tree + hierarchical subset selection
 ```
 
+Level 1 summarizes full snapshots as `full snapshot T · current X agents, Y
+spaces`. It also compares the latest full snapshot with the largest full snapshot
+from the previous seven days using a swappable archived-state strategy. Positive
+per-space count differences render as `archived X agents, Y spaces (since T)`;
+curated captures do not participate. The metadata stays inline when it fits and
+wraps to an indented ghosted line otherwise.
+
 At the workspace level, `space` or `tab` selects every missing pane and `l`
 inspects a target. In the inspector, tab selection cascades to missing
 descendants while already-live panes are dim, non-focusable, and skipped by
