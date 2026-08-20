@@ -22,4 +22,19 @@ EOF
   printf 'Installed prefix+R Herdr keybinding in %s\n' "$config"
 fi
 
+if grep -Fq 'command = "herdr-archive.stop-current"' "$config"; then
+  printf 'Herdr capture-and-stop keybinding already installed in %s\n' "$config"
+else
+  cat >>"$config" <<'EOF'
+
+# Capture the invoking session before asking whether to stop it.
+[[keys.command]]
+key = "prefix+alt+q"
+type = "plugin_action"
+command = "herdr-archive.stop-current"
+description = "capture and stop current session"
+EOF
+  printf 'Installed prefix+Alt-Q Herdr keybinding in %s\n' "$config"
+fi
+
 "$herdr_bin" config check

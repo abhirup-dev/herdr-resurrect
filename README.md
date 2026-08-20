@@ -13,9 +13,12 @@ grok → local proxy, …) comes back as the wrong provider, silently, or as a
 dead shell. tmux-resurrect has carried the same gap for years
 ([#109](https://github.com/tmux-plugins/tmux-resurrect/issues/109)).
 
-herdr-archive captures the pane's **live environment verbatim** (`ps Ewww`)
-and replays it blindly. It assumes no knowledge of how that env was
-produced — wrappers, launchers, or shells.
+herdr-archive captures the pane's **live environment** (`ps Ewww`) and
+replays stable configuration without needing to understand the launcher.
+Provider credentials, model mappings, and ordinary user settings survive;
+per-process terminal state does not. This deliberately excludes `HERDR_*`,
+`CMUX_*`, Claude process IDs, and cmux's temporary `NODE_OPTIONS` preload,
+which would otherwise refer to a dead source session.
 
 ## Install
 
@@ -26,15 +29,16 @@ make install
 ```
 
 This builds the binary, installs the CLI to `~/.local/bin/herdr-archive`, links
-the checkout as a local Herdr plugin, and adds the `prefix + R` keybinding once.
+the checkout as a local Herdr plugin, and adds the `prefix + R` browser and
+`prefix + Alt-Q` capture-and-stop keybindings once.
 Use `make help` for separate build, check, CLI, plugin, and keybinding targets.
 `PREFIX`, `BINDIR`, `GO`, `HERDR`, and `HERDR_CONFIG_PATH` are overridable.
 
 ## Verbs
 
 ```
-herdr-archive capture  [--session N] [--workspace ID] [--name TEXT]
-herdr-archive archive  --session N [--name TEXT] [--force]
+herdr-archive capture  [--session N] [--workspace ID] [--pane ID] [--name TEXT]
+herdr-archive archive  --session N [--name TEXT] [--force] [--yes]
 herdr-archive resume   --session N [selectors] [--yes]
 herdr-archive park     --workspace ID [--session N] [--name TEXT] [--yes]
 herdr-archive unpark   [selectors] [--session N] [--into N] [--yes]
@@ -44,6 +48,8 @@ selectors: --workspace | --tab | --agent   (partial resume)
 Everything mutating is a dry-run until `--yes`. `resume` and `unpark` compile
 the same additive plan used by the TUI: already-live panes are diagnostic only;
 execution adds missing panes and never closes or replaces existing ones.
+`archive` captures the full live session before stopping it; `default` additionally
+requires `--force`.
 
 ## Storage (resurrect conventions)
 
@@ -53,6 +59,11 @@ execution adds missing panes and never closes or replaces existing ones.
                             live env: API tokens, base URLs, model maps)
   last -> herdr_<ts>.json   repoint to travel in time
 ```
+
+Version 2 manifests may include `capture_scope`. Scoped snapshots retain the
+full workspace/tab/pane tree and split geometry, but only scoped panes contain
+launch payloads and may be restored. Version 1 snapshots remain whole-snapshot
+captures.
 
 ## How resume works
 
@@ -96,6 +107,11 @@ untouched.
 8. Wrapper model flags replay correctly by blind env: `--model opus` +
    captured `ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.3[1m]` is the wrapper's own
    trick, replayed without knowing it.
+9. **Never replay multiplexer hook state.** cmux's temporary
+   `NODE_OPTIONS=--require …/restore-node-options.cjs` disappears with the
+   source session. Replaying it makes later Node-based Claude hooks fail before
+   they start, so cmux and Claude process-scoped values are intentionally
+   filtered on restore.
 
 ## Browsing (TUI)
 
@@ -113,17 +129,38 @@ Sessions
        └─ captured workspace tree + hierarchical subset selection
 ```
 
-At the workspace level, `space` selects every missing pane and `l` inspects a
-target. In the inspector, tab selection cascades to missing descendants while
-already-live panes are dim, non-focusable, and skipped by `j/k`. `p` previews
-the collapsed selected topology. `R` opens the compiled visual BEFORE / AFTER
-diff; `y` executes those exact additive operations and refreshes live state.
-`backspace` clears the composite selection at either level.
+At the workspace level, `space` or `tab` selects every missing pane and `l`
+inspects a target. In the inspector, tab selection cascades to missing
+descendants while already-live panes are dim, non-focusable, and skipped by
+`j/k`. `p` previews the collapsed selected topology. `R` opens the compiled
+visual BEFORE / AFTER diff from either level; `y` executes those exact additive
+operations and refreshes live state. `backspace` clears the composite selection.
+Long custom pickers, confirmations, and previews share one viewport. Focused rows
+stay near the vertical center where possible; passive views scroll with `j/k`.
+The hotkey footer remains pinned while content moves. Workspaces represented in
+the current `last` capture are ordered first.
 
-`c` captures the selected session. Capital `C` captures every running session
-from Level 1, or all workspaces in the current session from Level 2. The naming
-dialog is optional; submitting it empty uses a human-readable capture date and
-time.
+`c` opens a live topology picker. Workspace, tab, and pane nodes are tri-state;
+`space` and `tab` both toggle selection before the optional naming dialog. A
+partial capture stores only selected pane payloads while retaining the complete
+topology as non-restorable geometry context. Capital `C` retains the direct
+whole-session behavior (all running sessions from Level 1, current session from
+Level 2).
+
+`x` is available from Levels 1–3 and opens a destructive capture-and-stop plan.
+The current session is summarized by workspace by default; `p` expands it into
+the full workspace/tab/pane tree, including each pane's detected provider. The
+hotkey footer stays pinned while `j/k` scroll the expanded tree. Nothing happens
+until explicit `y` confirmation.
+
+`prefix+Alt-Q` is the direct current-session shutdown flow. It first saves a
+`Session stop capture · <date/time>` snapshot, then opens the same current-session
+visualization and asks whether to stop that session. Cancelling leaves the
+session running and keeps the already-saved snapshot. Execution verifies the
+live topology against that exact saved snapshot and rejects the operation if it
+changed meanwhile. From the named capture dialog, `ctrl+x` reaches the same
+plan. Capture-and-stop requires every live pane to be selected; partial captures
+are capture-only.
 
 ### Brand images
 
@@ -158,9 +195,8 @@ for real.
 
 ## Plugin
 
-`herdr plugin link <repo>` registers the `browser` popup and the
-`herdr-archive.open-browser` global action. Bind `prefix + R` in
-`~/.config/herdr/config.toml` with Herdr's shifted-key spelling:
+`herdr plugin link <repo>` registers the archive browser and current-session
+stop popups. `make install` adds both bindings:
 
 ```toml
 [[keys.command]]
@@ -168,6 +204,12 @@ key = "prefix+shift+r"
 type = "plugin_action"
 command = "herdr-archive.open-browser"
 description = "open herdr archive"
+
+[[keys.command]]
+key = "prefix+alt+q"
+type = "plugin_action"
+command = "herdr-archive.stop-current"
+description = "capture and stop current session"
 ```
 
 The popup inherits `HERDR_SOCKET_PATH`, so the invoking Herdr session is

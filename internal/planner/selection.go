@@ -49,6 +49,34 @@ func MapMatching(previous Selection, workspace manifest.Workspace) Selection {
 	return selection
 }
 
+// DefaultSelection returns the snapshot's persisted capture scope for one
+// workspace. Legacy snapshots without a scope select the complete workspace.
+func DefaultSelection(snapshot *manifest.Snapshot, workspace manifest.Workspace) Selection {
+	keys := snapshot.CapturedPaneKeys(workspace.ID)
+	if keys == nil {
+		return SelectWhole(workspace)
+	}
+	selection := Selection{}
+	for _, key := range PaneKeys(workspace) {
+		if keys[key] {
+			selection[key] = true
+		}
+	}
+	return selection
+}
+
+// RestrictSelection enforces a persisted capture scope as a hard upper bound.
+func RestrictSelection(selection Selection, allowed Selection) {
+	if allowed == nil {
+		return
+	}
+	for key := range selection {
+		if !allowed[key] {
+			delete(selection, key)
+		}
+	}
+}
+
 // TabSelectedCount reports selected and total panes beneath a tab node.
 func TabSelectedCount(tab manifest.Tab, selection Selection) (selected, total int) {
 	for _, pane := range tab.Panes {

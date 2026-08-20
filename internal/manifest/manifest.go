@@ -12,16 +12,30 @@ import (
 )
 
 // Version is the snapshot format version.
-const Version = 1
+const Version = 2
 
 // Snapshot is one capture of a herdr session.
 type Snapshot struct {
-	Version    int         `json:"version"`
-	Name       string      `json:"name,omitempty"`
-	CreatedAt  time.Time   `json:"created_at"`
-	Session    string      `json:"session"` // "default" or a named session
-	SessionDir string      `json:"session_dir,omitempty"`
-	Workspaces []Workspace `json:"workspaces"`
+	Version      int           `json:"version"`
+	Name         string        `json:"name,omitempty"`
+	CreatedAt    time.Time     `json:"created_at"`
+	Session      string        `json:"session"` // "default" or a named session
+	SessionDir   string        `json:"session_dir,omitempty"`
+	CaptureScope *CaptureScope `json:"capture_scope,omitempty"`
+	Workspaces   []Workspace   `json:"workspaces"`
+}
+
+// CaptureScope marks the panes whose launch payload was captured. The full
+// topology remains in the snapshot as geometry context; absent means every
+// pane is captured, preserving version 1 behavior.
+type CaptureScope struct {
+	Panes []PaneRef `json:"panes"`
+}
+
+type PaneRef struct {
+	WorkspaceID string `json:"workspace_id"`
+	TabID       string `json:"tab_id"`
+	PaneKey     string `json:"pane_key"`
 }
 
 // Workspace is a captured workspace; cwd is derived from its first pane.
@@ -158,13 +172,57 @@ func Latest(root, session string) (string, error) {
 	return matches[len(matches)-1], nil
 }
 
-// AgentPanes flattens all captured panes that hold an agent.
+// CapturedPaneKeys returns the payload-bearing pane keys for one workspace.
+// A nil map means the snapshot is unscoped and every pane is captured.
+func (s *Snapshot) CapturedPaneKeys(workspaceID string) map[string]bool {
+	if s == nil || s.CaptureScope == nil {
+		return nil
+	}
+	keys := map[string]bool{}
+	for _, ref := range s.CaptureScope.Panes {
+		if ref.WorkspaceID == workspaceID {
+			keys[ref.PaneKey] = true
+		}
+	}
+	return keys
+}
+
+// CapturesPane reports whether a pane has a restorable payload rather than
+// serving only as topology and geometry context.
+func (s *Snapshot) CapturesPane(workspaceID, tabID, paneKey string) bool {
+	if s == nil || s.CaptureScope == nil {
+		return true
+	}
+	for _, ref := range s.CaptureScope.Panes {
+		if ref.WorkspaceID == workspaceID && ref.TabID == tabID && ref.PaneKey == paneKey {
+			return true
+		}
+	}
+	return false
+}
+
+// CapturedPaneCount reports payload panes and total topology panes.
+func (s *Snapshot) CapturedPaneCount() (captured, total int) {
+	for _, w := range s.Workspaces {
+		for _, t := range w.Tabs {
+			for _, p := range t.Panes {
+				total++
+				if s.CapturesPane(w.ID, t.ID, p.Key) {
+					captured++
+				}
+			}
+		}
+	}
+	return
+}
+
+// AgentPanes flattens captured payload panes that hold an agent.
 func (s *Snapshot) AgentPanes() []Pane {
 	var out []Pane
 	for _, w := range s.Workspaces {
 		for _, t := range w.Tabs {
 			for _, p := range t.Panes {
-				if p.Agent != "" {
+				if p.Agent != "" && s.CapturesPane(w.ID, t.ID, p.Key) {
 					out = append(out, p)
 				}
 			}
@@ -174,8 +232,8 @@ func (s *Snapshot) AgentPanes() []Pane {
 }
 
 // Filter returns the sub-snapshot matching the selectors. Empty selectors
-// keep everything. This is the partial-resume subset; agents is a repeatable
-// allow-list of keys/names/pane-ids.
+// keep everything. Scoped snapshots retain their full topology and narrow the
+// persisted capture scope so geometry context cannot become restorable.
 func (s *Snapshot) Filter(wsID, tabID string, agents []string) *Snapshot {
 	want := func(p Pane) bool {
 		if len(agents) == 0 {
@@ -188,6 +246,32 @@ func (s *Snapshot) Filter(wsID, tabID string, agents []string) *Snapshot {
 		}
 		return false
 	}
+	if s.CaptureScope != nil {
+		copy := *s
+		copy.Workspaces = append([]Workspace(nil), s.Workspaces...)
+		copy.CaptureScope = &CaptureScope{}
+		for _, w := range s.Workspaces {
+			if wsID != "" && w.ID != wsID && w.Label != wsID {
+				continue
+			}
+			for _, t := range w.Tabs {
+				if tabID != "" && t.ID != tabID && t.Label != tabID {
+					continue
+				}
+				for _, p := range t.Panes {
+					if s.CapturesPane(w.ID, t.ID, p.Key) && want(p) {
+						copy.CaptureScope.Panes = append(copy.CaptureScope.Panes, PaneRef{
+							WorkspaceID: w.ID,
+							TabID:       t.ID,
+							PaneKey:     p.Key,
+						})
+					}
+				}
+			}
+		}
+		return &copy
+	}
+
 	out := &Snapshot{Version: s.Version, Name: s.Name, CreatedAt: s.CreatedAt, Session: s.Session, SessionDir: s.SessionDir}
 	for _, w := range s.Workspaces {
 		if wsID != "" && w.ID != wsID && w.Label != wsID {

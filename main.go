@@ -20,9 +20,8 @@ import (
 const usage = `herdr-archive — capture, archive, and resume herdr sessions env-faithfully
 
 usage:
-  herdr-archive capture  [--session NAME] [--workspace ID]   write a snapshot manifest
-  herdr-archive archive  <session>                           capture + session stop
-  herdr-archive archive-all [--exclude default]              iterate sessions, one at a time
+  herdr-archive capture  [--session NAME] [--workspace ID] [--pane ID]  write a snapshot
+  herdr-archive archive  --session NAME [--force] [--yes]                capture + stop
   herdr-archive resume   <session-or-snapshot> [selectors]   attach + verify + sweep
   herdr-archive park     --workspace <ID> [--session NAME]   capture + workspace close
   herdr-archive unpark   --from <manifest> [--into SESSION]  recreate workspace + relaunch
@@ -45,8 +44,6 @@ func main() {
 		code = cmdCapture(os.Args[2:])
 	case "archive":
 		code = cmdArchive(os.Args[2:])
-	case "archive-all":
-		code = notImplemented("archive-all")
 	case "resume":
 		code = cmdResume(os.Args[2:])
 	case "park":
@@ -56,11 +53,20 @@ func main() {
 	case "status":
 		code = notImplemented("status")
 	case "browse":
-		if err := tui.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "browse: %v\n", err)
-			code = 1
-		} else {
-			code = 0
+		options := tui.Options{}
+		for _, arg := range os.Args[2:] {
+			if arg != "--stop-current" {
+				fmt.Fprintf(os.Stderr, "browse: unknown option %q\n", arg)
+				code = 2
+				break
+			}
+			options.StopCurrent = true
+		}
+		if code == 0 {
+			if err := tui.Run(options); err != nil {
+				fmt.Fprintf(os.Stderr, "browse: %v\n", err)
+				code = 1
+			}
 		}
 	case "action":
 		code = action(os.Args[2:])

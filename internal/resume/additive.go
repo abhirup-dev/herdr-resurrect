@@ -57,7 +57,7 @@ func ApplyCompiled(plan *planner.Plan) error {
 	renamed := map[string]bool{}
 	for _, operation := range plan.Operations {
 		destination := destinationKey(operation.WorkspaceKey, operation.TabKey)
-		if renamed[destination] || operation.TabLabel == "" {
+		if renamed[destination] || !state.createdTabs[destination] || operation.TabLabel == "" {
 			continue
 		}
 		tabID := state.tabIDs[destination]
@@ -325,7 +325,10 @@ func destinationKey(workspaceKey, tabKey string) string {
 
 func paneIdentity(pane manifest.Pane) string {
 	if pane.Name != "" {
-		return pane.Name
+		return "name:" + pane.Name
 	}
-	return pane.Key
+	if pane.SID != "" {
+		return "sid:" + pane.Agent + ":" + pane.SID
+	}
+	return "pane:" + pane.Key
 }

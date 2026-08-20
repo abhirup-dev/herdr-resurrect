@@ -4,18 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-)
-
-var (
-	styTreeLabel = lipgloss.NewStyle().Bold(true)
-	styTreeMeta  = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Italic(true)
-	styTreeLive  = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true).Italic(true)
-	styTreeAdd   = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Italic(true)
-	styTreeMiss  = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Italic(true)
-	styTreeWarn  = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true).Italic(true)
-	styTreeFocus = lipgloss.NewStyle().Reverse(true).Bold(true)
 )
 
 type treeNode struct {
@@ -34,12 +23,13 @@ type treeOptions struct {
 const treeMetadataMinWidth = 48
 
 func highlightLine(line string, width int) string {
-	plain := ansi.Strip(line)
-	if width > 0 {
-		plain = fitLine(plain, width)
-		plain += strings.Repeat(" ", max(0, width-ansi.StringWidth(plain)))
+	contentWidth := width
+	if contentWidth > 0 {
+		contentWidth = max(1, contentWidth-2)
+		line = fitLine(line, contentWidth)
+		line += strings.Repeat(" ", max(0, contentWidth-ansi.StringWidth(line)))
 	}
-	return styTreeFocus.Render(plain)
+	return styFocusBar.Render("│") + " " + line
 }
 
 func renderTree(nodes []treeNode, options treeOptions) []string {
@@ -58,20 +48,28 @@ func renderTree(nodes []treeNode, options treeOptions) []string {
 			}
 			content += node.Label
 			line := content
+			lineWidth := options.Width
+			if options.Controls && lineWidth > 0 {
+				lineWidth = max(1, lineWidth-2)
+			}
 			if metadata := treeMetadata(node.Metadata...); metadata != "" &&
-				(options.Width == 0 || options.Width >= treeMetadataMinWidth) {
-				if options.Width > 0 {
+				(lineWidth == 0 || lineWidth >= treeMetadataMinWidth) {
+				if lineWidth > 0 {
 					metadataWidth := ansi.StringWidth(metadata)
-					contentBudget := max(1, options.Width-metadataWidth-2)
+					contentBudget := max(1, lineWidth-metadataWidth-2)
 					content = fitLine(content, contentBudget)
-					gap := max(2, options.Width-ansi.StringWidth(content)-metadataWidth)
+					gap := max(2, lineWidth-ansi.StringWidth(content)-metadataWidth)
 					line = content + strings.Repeat(" ", gap) + metadata
 				} else {
 					line += "  " + metadata
 				}
 			}
-			if node.Focused {
-				line = highlightLine(line, options.Width)
+			if options.Controls {
+				if node.Focused {
+					line = highlightLine(line, options.Width)
+				} else {
+					line = "  " + line
+				}
 			}
 			lines = append(lines, line)
 			walk(node.Children, childPrefix)

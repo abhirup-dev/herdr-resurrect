@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	archiveop "github.com/abhirupdas/herdr-archive/internal/archive"
 	"github.com/abhirupdas/herdr-archive/internal/brands"
 	"github.com/abhirupdas/herdr-archive/internal/capture"
 	"github.com/abhirupdas/herdr-archive/internal/kitty"
@@ -28,28 +30,13 @@ import (
 	"github.com/abhirupdas/herdr-archive/internal/strategy"
 )
 
-var (
-	styTitle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	styDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styOK      = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	styWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	styBad     = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	styNice    = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
-	styVerdict = map[string]lipgloss.Style{
-		"KEEP-NATIVE": styOK,
-		"REPLACE":     styBad,
-		"RELAUNCH":    styWarn,
-		"RESURRECT":   styNice,
-		"SHELL":       styDim,
-	}
-)
-
 type mode int
 
 const (
 	viewSessions mode = iota
 	viewSnapshots
 	viewInspect
+	viewCapture
 	// viewPlan is the unreachable legacy single-snapshot diff UI, retained
 	// temporarily as a reference while the additive planner settles.
 	viewPlan
@@ -104,36 +91,53 @@ type planData struct {
 }
 
 type model struct {
-	mode            mode
-	width           int
-	height          int
-	sessions        []sessionRow
-	snaps           []snapshotRow
-	targets         []workspaceTarget
-	workspacePlan   map[string]workspaceSelection
-	live            *manifest.Snapshot
-	compiled        *planner.Plan
-	plannerCursor   int
-	inspectTarget   workspaceTarget
-	inspectCursor   int
-	inspectPreview  bool
-	sessList        list.Model
-	snapList        list.Model
-	planList        list.Model
-	captureInput    textinput.Model
-	captureSession  string
-	captureSessions []string
-	namingCapture   bool
-	spin            spinner.Model
-	spinning        bool
-	preview         bool
-	previewCursor   int
-	confirm         string
-	cur             *sessionRow
-	curSnap         string
-	plan            *planData
-	note            string
-	err             error
+	mode              mode
+	width             int
+	height            int
+	sessions          []sessionRow
+	snaps             []snapshotRow
+	targets           []workspaceTarget
+	workspacePlan     map[string]workspaceSelection
+	live              *manifest.Snapshot
+	compiled          *planner.Plan
+	plannerCursor     int
+	plannerScroll     int
+	inspectTarget     workspaceTarget
+	inspectCursor     int
+	inspectScroll     int
+	inspectPreview    bool
+	sessList          list.Model
+	snapList          list.Model
+	planList          list.Model
+	captureInput      textinput.Model
+	captureSession    string
+	captureSessions   []string
+	captureLive       *manifest.Snapshot
+	captureSelection  planner.Selection
+	captureCursor     int
+	captureScroll     int
+	captureReturnMode mode
+	namingCapture     bool
+	archiveLive       *manifest.Snapshot
+	archiveName       string
+	archivePath       string
+	archivePreSaved   bool
+	archivePreview    bool
+	archiveScroll     int
+	startupCmd        tea.Cmd
+	stopCurrentMode   bool
+	spin              spinner.Model
+	spinning          bool
+	preview           bool
+	previewCursor     int
+	previewScroll     int
+	confirm           string
+	confirmScroll     int
+	cur               *sessionRow
+	curSnap           string
+	plan              *planData
+	note              string
+	err               error
 }
 
 type planMsg struct {
@@ -155,16 +159,22 @@ type plannerLiveMsg struct {
 // to the colored glyph.
 var icons kitty.Icons
 
-func Run() error {
+type Options struct {
+	StopCurrent bool
+}
+
+func Run(options Options) error {
 	captureInput := textinput.New()
 	captureInput.Placeholder = "optional — defaults to date and time"
 	captureInput.Prompt = ""
 	captureInput.CharLimit = 72
 	captureInput.SetWidth(48)
+	spin := spinner.New(spinner.WithSpinner(spinner.Dot))
+	spin.Style = styTitle
 	m := &model{
 		width:         96,
 		height:        24,
-		spin:          spinner.New(spinner.WithSpinner(spinner.Dot)),
+		spin:          spin,
 		captureInput:  captureInput,
 		workspacePlan: map[string]workspaceSelection{},
 	}
@@ -180,6 +190,25 @@ func Run() error {
 	m.planList.SetFilteringEnabled(false)
 	m.syncSessionList()
 	m.selectInvokingSession()
+	if options.StopCurrent {
+		m.stopCurrentMode = true
+		item, ok := m.sessList.SelectedItem().(sessionItem)
+		if !ok || invokingSessionName() == "" {
+			return fmt.Errorf("stop-current must run inside a Herdr session")
+		}
+		for i := range m.sessions {
+			if m.sessions[i].name == item.row.name {
+				m.cur = &m.sessions[i]
+				break
+			}
+		}
+		if m.cur == nil || !m.cur.running {
+			return fmt.Errorf("invoking Herdr session is not running")
+		}
+		m.spinning = true
+		m.note = "capturing current session…"
+		m.startupCmd = tea.Batch(loadSavedStopPlanCmd(m.cur.name), m.spin.Tick)
+	}
 	// brand images: transmit the embedded logos quietly and create virtual
 	// placements; rows then reference them via unicode-placeholder cells,
 	// which travel through bubbletea frames as ordinary styled text.
@@ -207,7 +236,9 @@ func icon(kind, title string) string {
 }
 
 func newList() list.Model {
-	l := list.New([]list.Item{}, list.NewDefaultDelegate(), 88, 10)
+	delegate := list.NewDefaultDelegate()
+	delegate.Styles = archiveItemStyles()
+	l := list.New([]list.Item{}, delegate, 88, 10)
 	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
 	l.SetShowHelp(false)
@@ -217,6 +248,7 @@ func newList() list.Model {
 
 func newSnapshotList() list.Model {
 	delegate := list.NewDefaultDelegate()
+	delegate.Styles = archiveItemStyles()
 	delegate.SetHeight(3)
 	delegate.SetSpacing(1)
 	l := list.New([]list.Item{}, delegate, 88, 10)
@@ -227,13 +259,8 @@ func newSnapshotList() list.Model {
 	return l
 }
 
-func (m *model) setListBackground(isDark bool) {
-	styles := list.NewDefaultItemStyles(isDark)
-	if !isDark {
-		styles.NormalDesc = styles.NormalDesc.Foreground(lipgloss.Color("#666666"))
-		styles.DimmedTitle = styles.DimmedTitle.Foreground(lipgloss.Color("#777777"))
-		styles.DimmedDesc = styles.DimmedDesc.Foreground(lipgloss.Color("#777777"))
-	}
+func (m *model) setListBackground(_ bool) {
+	styles := archiveItemStyles()
 
 	standard := list.NewDefaultDelegate()
 	standard.Styles = styles
@@ -328,15 +355,17 @@ func (m *model) refreshSessions() {
 func (m *model) loadSnaps() {
 	m.snaps = nil
 	m.targets = nil
+	m.plannerScroll = 0
 	if m.cur == nil {
 		return
 	}
+	paths := append([]string(nil), m.cur.snaps[:min(3, len(m.cur.snaps))]...)
+	if m.cur.last != "" && !slices.Contains(paths, m.cur.last) {
+		paths = append(paths, m.cur.last)
+	}
 	var workspaceOrder []string
 	grouped := map[string][]workspaceTarget{}
-	for i, path := range m.cur.snaps {
-		if i == 3 {
-			break
-		}
+	for _, path := range paths {
 		row := snapshotRow{path: path}
 		row.snap, row.err = manifest.Load(path)
 		m.snaps = append(m.snaps, row)
@@ -357,8 +386,35 @@ func (m *model) loadSnaps() {
 			})
 		}
 	}
+	hasCurrent := func(targets []workspaceTarget) bool {
+		for _, target := range targets {
+			if target.isLast {
+				return true
+			}
+		}
+		return false
+	}
+	sort.SliceStable(workspaceOrder, func(i, j int) bool {
+		leftCurrent, rightCurrent := hasCurrent(grouped[workspaceOrder[i]]), hasCurrent(grouped[workspaceOrder[j]])
+		if leftCurrent != rightCurrent {
+			return leftCurrent
+		}
+		leftTime := grouped[workspaceOrder[i]][0].snapshot.CreatedAt
+		rightTime := grouped[workspaceOrder[j]][0].snapshot.CreatedAt
+		if !leftTime.Equal(rightTime) {
+			return leftTime.After(rightTime)
+		}
+		return workspaceOrder[i] < workspaceOrder[j]
+	})
 	for _, key := range workspaceOrder {
-		m.targets = append(m.targets, grouped[key]...)
+		targets := grouped[key]
+		sort.SliceStable(targets, func(i, j int) bool {
+			if targets[i].isLast != targets[j].isLast {
+				return targets[i].isLast
+			}
+			return targets[i].snapshot.CreatedAt.After(targets[j].snapshot.CreatedAt)
+		})
+		m.targets = append(m.targets, targets...)
 	}
 	if m.plannerCursor >= len(m.targets) {
 		m.plannerCursor = max(0, len(m.targets)-1)
@@ -395,8 +451,9 @@ func loadPlanCmd(session, snapPath string) tea.Cmd {
 	}
 }
 
-func captureSessionsCmd(sessions []string, name string) tea.Cmd {
+func captureSessionsCmd(sessions []string, name string, paneIDs []string) tea.Cmd {
 	targets := append([]string(nil), sessions...)
+	selectedPanes := append([]string(nil), paneIDs...)
 	return func() tea.Msg {
 		if len(targets) == 0 {
 			return refreshedMsg{err: fmt.Errorf("no running sessions to capture")}
@@ -408,7 +465,11 @@ func captureSessionsCmd(sessions []string, name string) tea.Cmd {
 		var failures []string
 		captured := 0
 		for _, session := range targets {
-			cmd := exec.Command(self, "capture", "--session", session, "--name", name)
+			args := []string{"capture", "--session", session, "--name", name}
+			for _, paneID := range selectedPanes {
+				args = append(args, "--pane", paneID)
+			}
+			cmd := exec.Command(self, args...)
 			if err := cmd.Run(); err != nil {
 				failures = append(failures, session)
 				continue
@@ -490,6 +551,9 @@ func (i snapshotItem) Description() string {
 	metrics := fmt.Sprintf("%d %s · %d %s · %d %s · %s", agents, plural(agents, "agent"),
 		len(i.row.snap.Workspaces), plural(len(i.row.snap.Workspaces), "workspace"),
 		tabs, plural(tabs, "tab"), transcripts)
+	if captured, total := i.row.snap.CapturedPaneCount(); i.row.snap.CaptureScope != nil {
+		metrics = fmt.Sprintf("curated %d/%d panes · %s", captured, total, metrics)
+	}
 	return metrics + "\n" + agentRoster(i.row.snap)
 }
 func (i snapshotItem) FilterValue() string {
@@ -619,18 +683,27 @@ func (m *model) syncPlanList() {
 	}
 }
 
+func targetAllowed(target workspaceTarget) planner.Selection {
+	keys := target.snapshot.CapturedPaneKeys(target.workspace.ID)
+	if keys == nil {
+		return nil
+	}
+	return planner.Selection(keys)
+}
+
 func selectedPaneCount(selection workspaceSelection, live *manifest.Snapshot) (selected, total, liveCount int) {
-	return planner.RestorableCount(selection.target.workspace, selection.selected, planner.Analyze(selection.target.workspace, live))
+	return planner.RestorableCountWithin(selection.target.workspace, selection.selected,
+		planner.Analyze(selection.target.workspace, live), targetAllowed(selection.target))
 }
 
 func selectWholeTarget(target workspaceTarget, live *manifest.Snapshot) workspaceSelection {
 	states := planner.Analyze(target.workspace, live)
-	return workspaceSelection{target: target, selected: planner.SelectRestorable(target.workspace, states)}
+	return workspaceSelection{target: target, selected: planner.SelectRestorableWithin(target.workspace, states, targetAllowed(target))}
 }
 
 func mapTargetSelection(previous workspaceSelection, target workspaceTarget, live *manifest.Snapshot) workspaceSelection {
 	states := planner.Analyze(target.workspace, live)
-	return workspaceSelection{target: target, selected: planner.MapRestorable(previous.selected, target.workspace, states)}
+	return workspaceSelection{target: target, selected: planner.MapRestorableWithin(previous.selected, target.workspace, states, targetAllowed(target))}
 }
 
 func selectionMarker(selection workspaceSelection, live *manifest.Snapshot) string {
@@ -720,11 +793,12 @@ func moveInspectCursor(nodes []inspectNode, current, delta int) int {
 
 func inspectNodes(target workspaceTarget, live *manifest.Snapshot) []inspectNode {
 	states := planner.Analyze(target.workspace, live)
+	allowed := targetAllowed(target)
 	var nodes []inspectNode
 	for tabIndex, tab := range target.workspace.Tabs {
 		tabFocusable := false
 		for _, pane := range tab.Panes {
-			if states[pane.Key].Availability == planner.Restorable {
+			if (allowed == nil || allowed[pane.Key]) && states[pane.Key].Availability == planner.Restorable {
 				tabFocusable = true
 				break
 			}
@@ -732,7 +806,7 @@ func inspectNodes(target workspaceTarget, live *manifest.Snapshot) []inspectNode
 		nodes = append(nodes, inspectNode{tabIndex: tabIndex, paneIndex: -1, focusable: tabFocusable})
 		for paneIndex, pane := range tab.Panes {
 			nodes = append(nodes, inspectNode{tabIndex: tabIndex, paneIndex: paneIndex,
-				focusable: states[pane.Key].Availability == planner.Restorable})
+				focusable: (allowed == nil || allowed[pane.Key]) && states[pane.Key].Availability == planner.Restorable})
 		}
 	}
 	return nodes
@@ -755,6 +829,7 @@ func (m *model) inspectorTreeLines(preview bool) []string {
 		selection = workspaceSelection{target: m.inspectTarget, selected: planner.Selection{}}
 	}
 	states := m.targetStates(m.inspectTarget)
+	allowed := targetAllowed(m.inspectTarget)
 	var nodes []treeNode
 	nodeIndex := 0
 	for _, tab := range m.inspectTarget.workspace.Tabs {
@@ -762,6 +837,9 @@ func (m *model) inspectorTreeLines(preview bool) []string {
 		nodeIndex++
 		selectedCount, restorableCount, liveCount := 0, 0, 0
 		for _, pane := range tab.Panes {
+			if allowed != nil && !allowed[pane.Key] {
+				continue
+			}
 			if states[pane.Key].Availability == planner.Live {
 				liveCount++
 				continue
@@ -816,7 +894,10 @@ func (m *model) inspectorTreeLines(preview bool) []string {
 				continue
 			}
 			state := states[pane.Key]
-			if state.Availability == planner.Live {
+			if allowed != nil && !allowed[pane.Key] {
+				paneNode.Marker = styDim.Render("·")
+				paneNode.Metadata = []string{treeNeutral("topology context")}
+			} else if state.Availability == planner.Live {
 				paneNode.Marker = styOK.Render("●")
 				paneNode.Metadata = []string{treeLive("live"), treeNeutral(providerDisplay(pane.Agent, pane.Env))}
 				if len(state.Drift) > 0 {
@@ -850,7 +931,7 @@ func (m *model) inspectorView() string {
 		out = append(out, styTitle.Render("SELECTED TOPOLOGY"),
 			treeMetadata(treeNeutral(fmt.Sprintf("%d/%d selected", selected, total)), treeNeutral("branches compacted")), "")
 		out = append(out, m.inspectorTreeLines(true)...)
-		return strings.Join(out, "\n")
+		return m.scrollViewport(strings.Join(out, "\n"), -1, 3, &m.inspectScroll)
 	}
 	summary := []string{
 		treeNeutral(snapshotName(m.inspectTarget.snapshot)),
@@ -861,7 +942,7 @@ func (m *model) inspectorView() string {
 	}
 	out = append(out, styTitle.Render("SELECT TABS / PANES"), treeMetadata(summary...), "")
 	out = append(out, m.inspectorTreeLines(false)...)
-	return strings.Join(out, "\n")
+	return m.scrollViewport(strings.Join(out, "\n"), 3+m.inspectCursor, 3, &m.inspectScroll)
 }
 
 func (m *model) plannerView() string {
@@ -886,6 +967,7 @@ func (m *model) plannerView() string {
 	}
 
 	left := []string{styTitle.Render("WORKSPACES / TARGETS"), ""}
+	cursorLine := -1
 	lastWorkspace := ""
 	for index, target := range m.targets {
 		if target.key != lastWorkspace {
@@ -900,29 +982,25 @@ func (m *model) plannerView() string {
 			marker = selectionMarker(planned, m.live)
 		}
 		badge := ""
-		if target.isLast {
+		if target.snapshot.CaptureScope != nil {
+			badge = " " + styNice.Render("CURATED")
+		} else if target.isLast {
 			if planner.ExactWorkspaceMatch(target.workspace, m.live) {
 				badge = " " + treeLive("CURRENT")
 			} else {
 				badge = " " + treeMissing("STALE")
 			}
 		}
-		nameBudget := max(8, leftWidth-ansi.StringWidth(marker)-ansi.StringWidth(badge)-2)
-		targetLine := marker + " " + styTreeLabel.Render(fitLine(snapshotName(target.snapshot), nameBudget)) + badge
-		if index == m.plannerCursor {
-			targetLine = highlightLine(targetLine, leftWidth)
-		}
-		left = append(left, targetLine)
 
-		agents, tabs, size := workspaceStats(target.workspace)
-		left = append(left, "  "+treeMetadata(
+		agents, tabs, size := workspaceStats(target.snapshot, target.workspace)
+		details := []string{
 			treeNeutral(relTime(target.snapshot.CreatedAt.Local())),
 			treeNeutral(fmt.Sprintf("%d %s", agents, plural(agents, "agent"))),
 			treeNeutral(fmt.Sprintf("%d %s", tabs, plural(tabs, "tab"))),
-		))
+		}
 		if m.live != nil {
 			states := m.targetStates(target)
-			_, missing, liveCount := planner.RestorableCount(target.workspace, nil, states)
+			_, missing, liveCount := planner.RestorableCountWithin(target.workspace, nil, states, targetAllowed(target))
 			liveMeta := treeNeutral(fmt.Sprintf("%d live", liveCount))
 			if liveCount > 0 {
 				liveMeta = treeLive(fmt.Sprintf("%d live", liveCount))
@@ -931,9 +1009,26 @@ func (m *model) plannerView() string {
 			if missing > 0 {
 				missingMeta = treeMissing(fmt.Sprintf("%d missing", missing))
 			}
-			left = append(left, "  "+treeMetadata(liveMeta, missingMeta, treeNeutral(humanBytes(size))))
+			details = append(details, liveMeta, missingMeta)
+		}
+		details = append(details, treeNeutral(humanBytes(size)))
+		detailLine := treeMetadata(details...)
+
+		nameBudget := max(8, leftWidth-ansi.StringWidth(marker)-ansi.StringWidth(badge)-2)
+		targetLine := marker + " " + styTreeLabel.Render(fitLine(snapshotName(target.snapshot), nameBudget)) + badge
+		inline := ansi.StringWidth(targetLine)+ansi.StringWidth(detailLine)+2 <= max(1, leftWidth-2)
+		if inline {
+			targetLine += "  " + detailLine
+		}
+		if index == m.plannerCursor {
+			cursorLine = len(left)
+			targetLine = highlightLine(targetLine, leftWidth)
 		} else {
-			left = append(left, "  "+treeNeutral(humanBytes(size)))
+			targetLine = "  " + fitLine(targetLine, max(1, leftWidth-2))
+		}
+		left = append(left, targetLine)
+		if !inline {
+			left = append(left, "    "+fitLine(detailLine, max(1, leftWidth-4)))
 		}
 	}
 	if len(m.targets) == 0 {
@@ -945,7 +1040,7 @@ func (m *model) plannerView() string {
 			left = append(left, "", styWarn.Render("Live topology unavailable."),
 				styDim.Render("Press r to refresh before selecting or restoring."))
 		}
-		return strings.Join(fitLines(left, available), "\n")
+		return m.plannerViewport(strings.Join(fitLines(left, available), "\n"), cursorLine)
 	}
 
 	right := []string{styTitle.Render("RESTORATION PLAN"),
@@ -1006,9 +1101,10 @@ func (m *model) plannerView() string {
 	right = append(right, renderTree(workspaceNodes, treeOptions{Width: rightWidth})...)
 
 	if !split {
-		return strings.Join(fitLines(left, available), "\n") + "\n\n" + strings.Join(fitLines(right, available), "\n")
+		rendered := strings.Join(fitLines(left, available), "\n") + "\n\n" + strings.Join(fitLines(right, available), "\n")
+		return m.plannerViewport(rendered, cursorLine)
 	}
-	return joinColumns(left, right, leftWidth, rightWidth)
+	return m.plannerViewport(joinColumns(left, right, leftWidth, rightWidth), cursorLine)
 }
 
 func topologyStyle(change planner.Change) lipgloss.Style {
@@ -1285,11 +1381,11 @@ func workspaceKey(workspace manifest.Workspace) string {
 	return workspace.ID
 }
 
-func workspaceStats(workspace manifest.Workspace) (agents, tabs int, size int64) {
+func workspaceStats(snapshot *manifest.Snapshot, workspace manifest.Workspace) (agents, tabs int, size int64) {
 	tabs = len(workspace.Tabs)
 	for _, tab := range workspace.Tabs {
 		for _, pane := range tab.Panes {
-			if pane.Agent == "" {
+			if pane.Agent == "" || !snapshot.CapturesPane(workspace.ID, tab.ID, pane.Key) {
 				continue
 			}
 			agents++
@@ -1566,9 +1662,13 @@ func (m *model) title() string {
 		return base + styDim.Render("  › name capture")
 	}
 	if m.confirm == "archive" {
-		return base + styDim.Render("  › archive session")
+		page := "review capture & stop"
+		if m.archivePreSaved {
+			page = "session captured › confirm stop"
+		}
+		return base + styDim.Render("  › "+m.cur.name+" › "+page)
 	}
-	if m.confirm == "restore" && m.mode == viewSnapshots {
+	if m.confirm == "restore" && (m.mode == viewSnapshots || m.mode == viewInspect) {
 		return base + styDim.Render("  › "+m.cur.name+" › review additive restoration")
 	}
 	switch m.mode {
@@ -1582,6 +1682,8 @@ func (m *model) title() string {
 			page = "selected topology"
 		}
 		return base + styDim.Render("  › "+m.cur.name+" › "+m.inspectTarget.key+" › "+page)
+	case viewCapture:
+		return base + styDim.Render("  › "+m.cur.name+" › capture live panes")
 	default:
 		page := "restoration plan"
 		if m.confirm == "restore" {
@@ -1619,66 +1721,77 @@ func (m *model) banner() string {
 
 func (m *model) footer() string {
 	if m.namingCapture {
+		if m.captureLive != nil {
+			return renderHints(hintItem{"enter", "capture"}, hintItem{"ctrl+x", "capture & stop"}, hintItem{"esc", "cancel"})
+		}
 		return renderHints(hintItem{"enter", "capture"}, hintItem{"esc", "cancel"})
 	}
 	if m.confirm == "restore" {
-		return renderHints(hintItem{"y", "confirm restoration"}, hintItem{"esc", "cancel"})
+		return renderHints(hintItem{"j/k", "scroll"}, hintItem{"y", "confirm restoration"}, hintItem{"esc", "cancel"})
 	}
 	if m.confirm == "archive" {
-		return renderHints(hintItem{"y", "capture & archive"}, hintItem{"esc", "cancel"})
+		preview := hintItem{"p", "preview full session"}
+		if m.archivePreview {
+			preview = hintItem{"p", "collapse session"}
+		}
+		if m.archivePreSaved {
+			return renderHints(preview, hintItem{"j/k", "scroll"}, hintItem{"y", "stop captured session"}, hintItem{"esc", "keep running"})
+		}
+		return renderHints(preview, hintItem{"j/k", "scroll"}, hintItem{"y", "capture & stop session"}, hintItem{"esc", "cancel"})
 	}
 	switch m.mode {
 	case viewSessions:
 		return renderHints(
 			hintItem{"enter/l", "open"}, hintItem{"j/k", "move"}, hintItem{"c", "capture"},
-			hintItem{"C", "all sessions"}, hintItem{"x", "archive"}, hintItem{"/", "filter"}, hintItem{"q", "quit"},
+			hintItem{"C", "all sessions"}, hintItem{"x", "capture & stop"}, hintItem{"/", "filter"}, hintItem{"q", "quit"},
 		)
 	case viewSnapshots:
 		if m.width < 100 {
 			return renderHints(
-				hintItem{"space", "select"}, hintItem{"l", "inspect"}, hintItem{"C", "capture all"},
-				hintItem{"R", "review"}, hintItem{"backspace", "clear"}, hintItem{"h", "back"},
+				hintItem{"space/tab", "select"}, hintItem{"l", "inspect"}, hintItem{"c", "capture subset"},
+				hintItem{"x", "capture & stop"}, hintItem{"R", "review"}, hintItem{"backspace", "clear"}, hintItem{"h", "back"},
 			)
 		}
 		return renderHints(
-			hintItem{"space", "select missing"}, hintItem{"l", "inspect subset"}, hintItem{"j/k", "move"},
-			hintItem{"C", "capture all workspaces"}, hintItem{"r", "refresh"}, hintItem{"R", "review"},
+			hintItem{"space/tab", "select missing"}, hintItem{"l", "inspect subset"}, hintItem{"j/k", "move"},
+			hintItem{"c", "capture subset"}, hintItem{"C", "capture all"}, hintItem{"x", "capture & stop"},
+			hintItem{"r", "refresh"}, hintItem{"R", "review"},
 			hintItem{"backspace", "clear"}, hintItem{"h", "back"},
 		)
 	case viewInspect:
 		if m.inspectPreview {
-			return renderHints(hintItem{"p", "selection"}, hintItem{"backspace", "clear"}, hintItem{"h", "keep & back"})
+			return renderHints(hintItem{"j/k", "scroll"}, hintItem{"R", "review"}, hintItem{"x", "capture & stop"}, hintItem{"p", "selection"}, hintItem{"backspace", "clear"}, hintItem{"h", "keep & back"})
 		}
 		return renderHints(
-			hintItem{"space", "toggle"}, hintItem{"j/k", "move"},
+			hintItem{"space/tab", "toggle"}, hintItem{"j/k", "move"}, hintItem{"R", "review"},
+			hintItem{"c", "capture live"}, hintItem{"x", "capture & stop"},
 			hintItem{"p", "preview"}, hintItem{"backspace", "clear"}, hintItem{"h", "keep & back"},
+		)
+	case viewCapture:
+		return renderHints(
+			hintItem{"space/tab", "toggle"}, hintItem{"j/k", "move"}, hintItem{"a", "all"},
+			hintItem{"enter", "name capture"}, hintItem{"x", "capture & stop"}, hintItem{"backspace", "clear"}, hintItem{"h", "cancel"},
 		)
 	default:
 		if m.plan == nil {
 			return renderHints(hintItem{"h", "back"}, hintItem{"r", "retry"})
 		}
 		if m.preview {
-			return renderHints(hintItem{"p", "plan"}, hintItem{"y", "restore"}, hintItem{"h", "back"})
+			return renderHints(hintItem{"j/k", "move"}, hintItem{"p", "plan"}, hintItem{"y", "restore"}, hintItem{"h", "back"})
 		}
 		return renderHints(
-			hintItem{"space", "toggle"}, hintItem{"a", "all repairs"}, hintItem{"j/k", "move"},
+			hintItem{"space/tab", "toggle"}, hintItem{"a", "all repairs"}, hintItem{"j/k", "move"},
 			hintItem{"p", "preview"}, hintItem{"y", "restore"}, hintItem{"h", "back"}, hintItem{"r", "refresh"},
 		)
 	}
 }
 
 func (m *model) confirmationBody() string {
-	if m.confirm == "restore" && m.mode == viewSnapshots {
+	if m.confirm == "restore" && (m.mode == viewSnapshots || m.mode == viewInspect) {
 		return m.restorationConfirmationBody()
 	}
 	if m.confirm == "archive" {
-		name := "session"
-		if m.cur != nil {
-			name = m.cur.name
-		}
-		return styWarn.Render("Archive "+name+"?") + "\n\n" +
-			"Capture all live panes and their environment, then stop the session.\n" +
-			styDim.Render("The snapshot remains available as a restoration target.")
+		return m.deletionConfirmationBody()
 	}
 	agents := m.restorationAgents()
 	selected, _, _, _ := m.planCounts()
@@ -1701,7 +1814,7 @@ func (m *model) contentWidth() int {
 func (m *model) View() tea.View {
 	frameWidth := max(1, m.width-4)
 	contentWidth := m.contentWidth()
-	innerHeight := m.height - 2
+	innerHeight := m.height
 	if innerHeight < 1 {
 		innerHeight = 1
 	}
@@ -1732,7 +1845,12 @@ func (m *model) render() string {
 		b.WriteString("\n\n")
 		b.WriteString(m.captureInput.View())
 	} else if m.confirm != "" {
-		b.WriteString(m.confirmationBody())
+		body := m.confirmationBody()
+		scroll := &m.confirmScroll
+		if m.confirm == "archive" {
+			scroll = &m.archiveScroll
+		}
+		b.WriteString(m.scrollViewport(body, -1, 0, scroll))
 	} else {
 		switch m.mode {
 		case viewSessions:
@@ -1741,12 +1859,19 @@ func (m *model) render() string {
 			b.WriteString(m.plannerView())
 		case viewInspect:
 			b.WriteString(m.inspectorView())
+		case viewCapture:
+			b.WriteString(m.captureView())
 		default:
 			if m.preview {
-				for _, line := range m.previewLines() {
-					b.WriteString(line)
-					b.WriteString("\n")
+				lines := m.previewLines()
+				cursorLine := -1
+				for index, line := range lines {
+					if strings.Contains(line, "›") {
+						cursorLine = index
+						break
+					}
 				}
+				b.WriteString(m.scrollViewport(strings.Join(lines, "\n"), cursorLine, 2, &m.previewScroll))
 			} else if m.plan != nil && m.plan.plan != nil {
 				b.WriteString(m.planList.View())
 			} else if m.plan != nil && m.plan.plan == nil {
@@ -1757,18 +1882,26 @@ func (m *model) render() string {
 			}
 		}
 	}
-	b.WriteString("\n\n")
 	if m.note != "" {
+		b.WriteString("\n\n")
 		b.WriteString(styWarn.Render(m.note))
-		b.WriteString("\n")
 	}
-	b.WriteString(m.footer())
-	return b.String()
+	return m.pinFooter(strings.TrimRight(b.String(), "\n"), m.footer())
+}
+
+func (m *model) pinFooter(body, footer string) string {
+	height := max(1, m.height-2)
+	footerHeight := max(1, lipgloss.Height(footer))
+	bodyHeight := max(1, height-footerHeight-1)
+	lines := strings.Split(body, "\n")
+	visible := lines[:min(len(lines), bodyHeight)]
+	gap := max(1, height-len(visible)-footerHeight)
+	return strings.Join(visible, "\n") + strings.Repeat("\n", gap) + footer
 }
 
 // ---- update -------------------------------------------------------------
 
-func (m *model) Init() tea.Cmd { return tea.RequestBackgroundColor }
+func (m *model) Init() tea.Cmd { return tea.Batch(tea.RequestBackgroundColor, m.startupCmd) }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -1796,6 +1929,37 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinning, m.plan, m.err = false, msg.pd, msg.err
 		m.syncPlanList()
 		return m, nil
+	case archivePlanMsg:
+		m.spinning = false
+		m.archiveLive = msg.live
+		m.archivePath = msg.path
+		m.archivePreSaved = msg.saved
+		m.archivePreview = false
+		m.archiveScroll = 0
+		if msg.live != nil && msg.live.Name != "" {
+			m.archiveName = msg.live.Name
+		}
+		m.err = msg.err
+		if msg.err != nil {
+			m.note = "capture-and-stop plan unavailable: " + msg.err.Error()
+			return m, nil
+		}
+		m.note = ""
+		m.confirm = "archive"
+		return m, nil
+	case captureLiveMsg:
+		m.spinning = false
+		m.captureLive = msg.live
+		m.err = msg.err
+		if msg.err != nil {
+			m.note = "live topology unavailable: " + msg.err.Error()
+			return m, nil
+		}
+		m.captureSelection = captureSelection(msg.live)
+		m.captureCursor = 0
+		m.captureScroll = 0
+		m.note = ""
+		return m, nil
 	case plannerLiveMsg:
 		m.spinning = false
 		if msg.err != nil {
@@ -1811,6 +1975,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.live = msg.live
 		for key, selection := range m.workspacePlan {
 			states := planner.Analyze(selection.target.workspace, m.live)
+			planner.RestrictSelection(selection.selected, targetAllowed(selection.target))
 			planner.PruneLive(selection.selected, states)
 			m.workspacePlan[key] = selection
 		}
@@ -1876,6 +2041,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *model) reviewRestoration() {
+	if m.spinning || m.live == nil {
+		m.note = "wait for a current live topology before restoring"
+		return
+	}
+	m.compileRestorationPlan()
+	if m.compiled == nil || len(m.compiled.Operations) == 0 {
+		m.note = "select at least one missing pane"
+		return
+	}
+	m.confirm = "restore"
+	m.confirmScroll = 0
+}
+
 func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
 		return m, tea.Quit
@@ -1890,6 +2069,22 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.captureSessions = nil
 			m.note = ""
 			return m, nil
+		case "ctrl+x":
+			selected, total := captureSelectedCount(m.captureLive, m.captureSelection)
+			if m.captureLive == nil || selected == 0 || selected != total {
+				m.note = "capture & stop requires every live pane to be selected"
+				return m, nil
+			}
+			name := strings.TrimSpace(m.captureInput.Value())
+			if name == "" {
+				name = manifest.DefaultName(time.Now())
+			}
+			m.namingCapture = false
+			m.captureInput.Blur()
+			m.captureInput.Reset()
+			m.captureSession = ""
+			m.captureSessions = nil
+			return m, m.startArchiveReview(name)
 		case "enter":
 			name := strings.TrimSpace(m.captureInput.Value())
 			if name == "" {
@@ -1899,13 +2094,23 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if len(sessions) == 0 && m.captureSession != "" {
 				sessions = append(sessions, m.captureSession)
 			}
+			paneIDs := m.selectedCapturePaneIDs()
+			fromPicker := m.captureLive != nil
+			if selected, total := captureSelectedCount(m.captureLive, m.captureSelection); fromPicker && selected == total {
+				paneIDs = nil
+			}
 			m.namingCapture = false
 			m.captureInput.Blur()
 			m.captureInput.Reset()
 			m.captureSession = ""
 			m.captureSessions = nil
+			m.captureLive = nil
+			m.captureSelection = nil
+			if fromPicker {
+				m.mode = viewSnapshots
+			}
 			m.note = "capturing “" + name + "”…"
-			return m, captureSessionsCmd(sessions, name)
+			return m, captureSessionsCmd(sessions, name, paneIDs)
 		default:
 			var cmd tea.Cmd
 			m.captureInput, cmd = m.captureInput.Update(msg)
@@ -1924,15 +2129,45 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.snapList, cmd = m.snapList.Update(msg)
 		return m, cmd
 	}
+	if m.mode == viewPlan && m.planList.SettingFilter() {
+		var cmd tea.Cmd
+		m.planList, cmd = m.planList.Update(msg)
+		return m, cmd
+	}
 	if m.confirm != "" {
 		switch msg.String() {
+		case "p":
+			if m.confirm == "archive" {
+				m.archivePreview = !m.archivePreview
+				m.archiveScroll = 0
+			}
+			return m, nil
+		case "j", "down":
+			if m.confirm == "archive" {
+				m.archiveScroll++
+			} else {
+				m.confirmScroll++
+			}
+			return m, nil
+		case "k", "up":
+			if m.confirm == "archive" && m.archiveScroll > 0 {
+				m.archiveScroll--
+			} else if m.confirm != "archive" && m.confirmScroll > 0 {
+				m.confirmScroll--
+			}
+			return m, nil
 		case "y":
 			if m.confirm == "archive" {
 				return m.execArchive()
 			}
 			return m.execRestore()
 		case "esc", "q", "h":
+			m.archivePreview = false
+			m.archiveScroll = 0
 			m.confirm = ""
+			if m.stopCurrentMode && m.archivePreSaved {
+				return m, tea.Quit
+			}
 		}
 		return m, nil
 	}
@@ -1953,7 +2188,7 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.plannerCursor--
 			}
 			return m, nil
-		case "space", " ":
+		case "space", " ", "tab":
 			if m.spinning || m.live == nil {
 				m.note = "wait for a current live topology before selecting"
 				return m, nil
@@ -2010,16 +2245,7 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "R":
-			if m.spinning || m.live == nil {
-				m.note = "wait for a current live topology before restoring"
-				return m, nil
-			}
-			m.compileRestorationPlan()
-			if m.compiled == nil || len(m.compiled.Operations) == 0 {
-				m.note = "select at least one missing pane"
-				return m, nil
-			}
-			m.confirm = "restore"
+			m.reviewRestoration()
 			return m, nil
 		case "r":
 			if m.cur != nil {
@@ -2035,8 +2261,17 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "p":
 				m.inspectPreview = false
+				m.inspectScroll = 0
 				return m, nil
-			case "j", "down", "k", "up", "space", " ":
+			case "j", "down":
+				m.inspectScroll++
+				return m, nil
+			case "k", "up":
+				if m.inspectScroll > 0 {
+					m.inspectScroll--
+				}
+				return m, nil
+			case "space", " ", "tab":
 				return m, nil
 			}
 		}
@@ -2055,7 +2290,7 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			m.inspectCursor = moveInspectCursor(nodes, m.inspectCursor, -1)
 			return m, nil
-		case "space", " ":
+		case "space", " ", "tab":
 			if m.inspectCursor >= 0 && m.inspectCursor < len(nodes) && nodes[m.inspectCursor].focusable {
 				selection, ok := m.workspacePlan[m.inspectTarget.key]
 				if !ok || selection.selected == nil {
@@ -2064,11 +2299,12 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				node := nodes[m.inspectCursor]
 				tab := m.inspectTarget.workspace.Tabs[node.tabIndex]
 				states := m.targetStates(m.inspectTarget)
+				allowed := targetAllowed(m.inspectTarget)
 				if node.paneIndex < 0 {
-					planner.ToggleRestorableTab(tab, selection.selected, states)
+					planner.ToggleRestorableTabWithin(tab, selection.selected, states, allowed)
 				} else {
 					pane := tab.Panes[node.paneIndex]
-					if states[pane.Key].Availability == planner.Restorable {
+					if (allowed == nil || allowed[pane.Key]) && states[pane.Key].Availability == planner.Restorable {
 						planner.TogglePane(pane.Key, selection.selected)
 					}
 				}
@@ -2078,9 +2314,67 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "p":
 			m.inspectPreview = !m.inspectPreview
+			m.inspectScroll = 0
+			return m, nil
+		case "R":
+			m.reviewRestoration()
 			return m, nil
 		case "enter", "l":
 			return m, nil
+		}
+	}
+	if m.mode == viewCapture {
+		nodes := captureNodes(m.captureLive)
+		switch msg.String() {
+		case "h", "q", "esc":
+			m.mode = m.captureReturnMode
+			m.captureLive = nil
+			m.captureSelection = nil
+			m.err = nil
+			m.note = ""
+			return m, nil
+		case "r":
+			if m.cur != nil {
+				m.spinning = true
+				m.err = nil
+				m.note = "reading live topology…"
+				return m, tea.Batch(loadCaptureLiveCmd(m.cur.name), m.spin.Tick)
+			}
+			return m, nil
+		case "j", "down":
+			if m.captureCursor+1 < len(nodes) {
+				m.captureCursor++
+			}
+			return m, nil
+		case "k", "up":
+			if m.captureCursor > 0 {
+				m.captureCursor--
+			}
+			return m, nil
+		case "space", " ", "tab":
+			m.toggleCaptureNode()
+			m.note = ""
+			return m, nil
+		case "a":
+			m.captureSelection = captureSelection(m.captureLive)
+			m.note = ""
+			return m, nil
+		case "backspace":
+			m.captureSelection = planner.Selection{}
+			m.note = ""
+			return m, nil
+		case "enter", "l":
+			selected, _ := captureSelectedCount(m.captureLive, m.captureSelection)
+			if selected == 0 {
+				m.note = "select at least one live pane"
+				return m, nil
+			}
+			m.captureSession = m.cur.name
+			m.captureSessions = nil
+			m.namingCapture = true
+			m.captureInput.Reset()
+			m.note = ""
+			return m, m.captureInput.Focus()
 		}
 	}
 	if m.mode == viewPlan && m.preview {
@@ -2134,7 +2428,7 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.digIn()
 	case "h":
 		return m.back()
-	case "space", " ":
+	case "space", " ", "tab":
 		if m.mode == viewPlan && !m.preview && m.plan != nil && m.plan.plan != nil {
 			if item, ok := m.planList.SelectedItem().(planItem); ok {
 				i := item.index
@@ -2169,6 +2463,7 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.preview = !m.preview
 			if m.preview {
 				m.previewCursor = 0
+				m.previewScroll = 0
 			}
 		}
 	case "y":
@@ -2190,9 +2485,22 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		if (m.mode == viewSessions || m.mode == viewSnapshots) && m.cur != nil && m.cur.running {
-			m.confirm = "archive"
+		if m.mode == viewCapture {
+			if m.spinning || m.captureLive == nil {
+				m.note = "wait for the live topology before capture & stop"
+				return m, nil
+			}
+			selected, total := captureSelectedCount(m.captureLive, m.captureSelection)
+			if selected != total {
+				m.note = "capture & stop requires every live pane to be selected"
+				return m, nil
+			}
 		}
+		if (m.mode == viewSessions || m.mode == viewSnapshots || m.mode == viewInspect || m.mode == viewCapture) &&
+			m.cur != nil && m.cur.running {
+			return m, m.startArchiveReview("")
+		}
+		m.note = "selected session is not running"
 	case "C":
 		var sessions []string
 		switch m.mode {
@@ -2218,23 +2526,32 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.note = ""
 		return m, m.captureInput.Focus()
 	case "c":
-		name := ""
 		if m.mode == viewSessions {
 			if item, ok := m.sessList.SelectedItem().(sessionItem); ok {
-				name = item.row.name
+				for i := range m.sessions {
+					if m.sessions[i].name == item.row.name {
+						m.cur = &m.sessions[i]
+						break
+					}
+				}
 			}
-		} else if m.mode == viewSnapshots && m.cur != nil {
-			name = m.cur.name
 		}
-		if name == "" {
+		if (m.mode != viewSessions && m.mode != viewSnapshots && m.mode != viewInspect) || m.cur == nil {
 			return m, nil
 		}
-		m.captureSession = name
-		m.captureSessions = nil
-		m.namingCapture = true
-		m.captureInput.Reset()
-		m.note = ""
-		return m, m.captureInput.Focus()
+		if !m.cur.running {
+			m.note = "session is not running; nothing to capture"
+			return m, nil
+		}
+		m.captureReturnMode = m.mode
+		m.mode = viewCapture
+		m.captureLive = nil
+		m.captureSelection = planner.Selection{}
+		m.captureCursor = 0
+		m.err = nil
+		m.spinning = true
+		m.note = "reading live topology…"
+		return m, tea.Batch(loadCaptureLiveCmd(m.cur.name), m.spin.Tick)
 	case "r":
 		m.note = ""
 		if m.mode == viewPlan && m.plan != nil {
@@ -2296,6 +2613,7 @@ func (m *model) digIn() (tea.Model, tea.Cmd) {
 		if m.plan != nil {
 			m.preview = true
 			m.previewCursor = 0
+			m.previewScroll = 0
 		}
 		return m, nil
 	}
@@ -2320,7 +2638,7 @@ func (m *model) back() (tea.Model, tea.Cmd) {
 }
 
 func (m *model) execRestore() (tea.Model, tea.Cmd) {
-	if m.mode == viewSnapshots {
+	if m.mode == viewSnapshots || m.mode == viewInspect {
 		m.compileRestorationPlan()
 		if m.compiled == nil || len(m.compiled.Operations) == 0 {
 			m.confirm = ""
@@ -2329,6 +2647,7 @@ func (m *model) execRestore() (tea.Model, tea.Cmd) {
 		}
 		compiled := m.compiled
 		m.confirm = ""
+		m.mode, m.inspectPreview = viewSnapshots, false
 		m.spinning = true
 		m.note = fmt.Sprintf("restoring %d missing %s…", len(compiled.Operations), plural(len(compiled.Operations), "pane"))
 		apply := func() tea.Msg {
@@ -2373,21 +2692,30 @@ func (m *model) execRestore() (tea.Model, tea.Cmd) {
 }
 
 func (m *model) execArchive() (tea.Model, tea.Cmd) {
-	if m.cur == nil || !m.cur.running {
+	if m.cur == nil || !m.cur.running || m.archiveLive == nil {
 		m.confirm = ""
-		m.note = "selected session is not running"
-		return m, nil
-	}
-	self, err := os.Executable()
-	if err != nil {
-		m.confirm = ""
-		m.note = err.Error()
+		m.note = "selected session has no confirmed live deletion plan"
 		return m, nil
 	}
 	name := m.cur.name
+	planned, captureName, preSaved := m.archiveLive, m.archiveName, m.archivePreSaved
 	m.confirm = ""
-	m.note = "capturing and archiving " + name + "…"
-	return m, tea.ExecProcess(exec.Command(self, "archive", "--session", name), func(err error) tea.Msg {
-		return refreshedMsg{err: err, note: "archived " + name}
-	})
+	m.mode, m.inspectPreview = viewSessions, false
+	m.captureLive = nil
+	m.captureSelection = nil
+	m.archiveLive = nil
+	m.archivePath = ""
+	m.archivePreSaved = false
+	m.spinning = true
+	m.note = "stopping " + name + "…"
+	apply := func() tea.Msg {
+		var err error
+		if preSaved {
+			err = archiveop.Stop(planned)
+		} else {
+			_, err = archiveop.Apply(planned, captureName, "")
+		}
+		return refreshedMsg{err: err, note: "captured and stopped " + name}
+	}
+	return m, tea.Batch(apply, m.spin.Tick)
 }

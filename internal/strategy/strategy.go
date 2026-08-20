@@ -88,16 +88,32 @@ func ProviderVar(k string) bool {
 // never evidence of provider loss: herdr re-injects HERDR_* fresh, shells
 // churn their session keys, and macOS adds per-process system vars.
 func TransientEnv(k string) bool {
-	for _, p := range []string{"HERDR_", "SSH_", "LC_", "XPC", "STARSHIP_", "ATUIN_", "__CF", "__MISE", "_ZO", "OSLog"} {
+	for _, p := range []string{
+		"HERDR_", "CMUX_", "SSH_", "LC_", "XPC", "STARSHIP_", "ATUIN_", "__CF", "__MISE", "_ZO", "OSLog",
+	} {
 		if strings.HasPrefix(k, p) {
 			return true
 		}
 	}
 	switch k {
-	case "SHLVL", "PWD", "OLDPWD", "_", "LINES", "COLUMNS", "TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TERM_SESSION_ID", "TMPDIR", "DISPLAY", "SSH_AUTH_SOCK", "COMMAND_MODE", "LaunchInstanceID", "OSLogRateLimit", "MISE_SHELL", "GHOSTTY_SURFACE_ID":
+	case "CLAUDECODE", "CLAUDE_PID", "SHLVL", "PWD", "OLDPWD", "_", "LINES", "COLUMNS", "TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TERM_SESSION_ID", "TMPDIR", "DISPLAY", "SSH_AUTH_SOCK", "COMMAND_MODE", "LaunchInstanceID", "OSLogRateLimit", "MISE_SHELL", "GHOSTTY_SURFACE_ID":
 		return true
 	}
 	return false
+}
+
+// ReplayTransientEnv reports environment inherited from a terminal or agent
+// runtime rather than user/provider configuration. It must not cross a
+// restoration boundary: those values refer to the source process or machine.
+func ReplayTransientEnv(k, v string) bool {
+	if TransientEnv(k) {
+		return true
+	}
+	// cmux injects a temporary Node preload into Claude processes to support
+	// its own hooks. The file is removed with the source session; replaying
+	// the stale --require makes every later Node hook crash before it runs.
+	return k == "NODE_OPTIONS" && (strings.Contains(v, "cmux-claude-node-options") ||
+		strings.Contains(v, "restore-node-options.cjs"))
 }
 
 // ReplayEnv filters a captured env block down to what should be blindly
@@ -105,7 +121,7 @@ func TransientEnv(k string) bool {
 func ReplayEnv(env map[string]string) map[string]string {
 	out := make(map[string]string, len(env))
 	for k, v := range env {
-		if strings.HasPrefix(k, "HERDR_") {
+		if ReplayTransientEnv(k, v) {
 			continue
 		}
 		out[k] = v
@@ -125,7 +141,22 @@ func RelaunchCmdline(argv []string, resumeArgs []string) string {
 			parts = append(parts, resumeArgs...)
 		}
 	}
+	for index, part := range parts {
+		parts[index] = shellQuote(part)
+	}
 	return strings.Join(parts, " ")
+}
+
+// shellQuote preserves argv boundaries when Herdr runs the restored command
+// through an interactive shell. In particular, model aliases such as opus[1m]
+// must not be treated as zsh glob patterns.
+func shellQuote(arg string) string {
+	if arg != "" && strings.IndexFunc(arg, func(r rune) bool {
+		return !strings.ContainsRune("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_@%+=:,./-", r)
+	}) < 0 {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", "'\"'\"'") + "'"
 }
 
 // LaunchCmdline is RelaunchCmdline with fallbacks for processes whose argv

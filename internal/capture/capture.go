@@ -64,6 +64,7 @@ type sessionEntry struct {
 type Options struct {
 	Session      string // "" or "default" = default session
 	WorkspaceIDs []string
+	PaneIDs      []string // non-empty creates a curated snapshot with full topology context
 }
 
 var envKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -88,6 +89,14 @@ func Session(opts Options) (*manifest.Snapshot, error) {
 		CreatedAt:  time.Now().UTC(),
 		Session:    sess.Name,
 		SessionDir: sess.SessionDir,
+	}
+	curated := len(opts.PaneIDs) > 0
+	selectedPanes := map[string]bool{}
+	for _, paneID := range opts.PaneIDs {
+		selectedPanes[paneID] = true
+	}
+	if curated {
+		snap.CaptureScope = &manifest.CaptureScope{}
 	}
 
 	var wsList struct {
@@ -141,7 +150,8 @@ func Session(opts Options) (*manifest.Snapshot, error) {
 				}
 			}
 			for _, p := range panesByTab[t.TabID] {
-				mp, err := capturePane(scope, p, agentsByPane[p.PaneID])
+				hydrate := !curated || selectedPanes[p.PaneID]
+				mp, err := capturePane(scope, p, agentsByPane[p.PaneID], hydrate)
 				if err != nil {
 					return nil, err
 				}
@@ -149,17 +159,34 @@ func Session(opts Options) (*manifest.Snapshot, error) {
 					mw.Cwd = mp.Cwd
 				}
 				mt.Panes = append(mt.Panes, mp)
+				if hydrate && snap.CaptureScope != nil {
+					snap.CaptureScope.Panes = append(snap.CaptureScope.Panes, manifest.PaneRef{
+						WorkspaceID: w.WorkspaceID,
+						TabID:       t.TabID,
+						PaneKey:     mp.Key,
+					})
+					delete(selectedPanes, p.PaneID)
+				}
 			}
 			mw.Tabs = append(mw.Tabs, mt)
 		}
 		snap.Workspaces = append(snap.Workspaces, mw)
+	}
+	if len(selectedPanes) > 0 {
+		var missing []string
+		for _, paneID := range opts.PaneIDs {
+			if selectedPanes[paneID] {
+				missing = append(missing, paneID)
+			}
+		}
+		return nil, fmt.Errorf("selected panes not found: %s", strings.Join(missing, ", "))
 	}
 	return snap, nil
 }
 
 // capturePane records one pane. An agent pane keeps argv + live env; a shell
 // pane keeps only cwd (herdr snapshot restore already brings shells back).
-func capturePane(scope []string, p paneEntry, agent agentEntry) (manifest.Pane, error) {
+func capturePane(scope []string, p paneEntry, agent agentEntry, hydrate bool) (manifest.Pane, error) {
 	mp := manifest.Pane{
 		PaneID: p.PaneID,
 		Cwd:    p.Cwd,
@@ -176,6 +203,9 @@ func capturePane(scope []string, p paneEntry, agent agentEntry) (manifest.Pane, 
 		}
 	}
 	mp.Key = firstNonEmpty(mp.Name, p.PaneID)
+	if !hydrate {
+		return mp, nil
+	}
 
 	var info struct {
 		ProcessInfo processInfo `json:"process_info"`

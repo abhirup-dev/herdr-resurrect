@@ -154,7 +154,15 @@ func Analyze(workspace manifest.Workspace, live *manifest.Snapshot) map[string]P
 
 // RestorableCount reports selected and available panes in a workspace target.
 func RestorableCount(workspace manifest.Workspace, selection Selection, states map[string]PaneState) (selected, total, live int) {
+	return RestorableCountWithin(workspace, selection, states, nil)
+}
+
+// RestorableCountWithin applies an optional capture-scope upper bound.
+func RestorableCountWithin(workspace manifest.Workspace, selection Selection, states map[string]PaneState, allowed Selection) (selected, total, live int) {
 	for _, key := range PaneKeys(workspace) {
+		if allowed != nil && !allowed[key] {
+			continue
+		}
 		if states[key].Availability == Live {
 			live++
 			continue
@@ -169,8 +177,16 @@ func RestorableCount(workspace manifest.Workspace, selection Selection, states m
 
 // SelectRestorable selects only panes that are absent from the live session.
 func SelectRestorable(workspace manifest.Workspace, states map[string]PaneState) Selection {
+	return SelectRestorableWithin(workspace, states, nil)
+}
+
+// SelectRestorableWithin selects missing panes inside an optional capture scope.
+func SelectRestorableWithin(workspace manifest.Workspace, states map[string]PaneState, allowed Selection) Selection {
 	selection := Selection{}
 	for _, key := range PaneKeys(workspace) {
+		if allowed != nil && !allowed[key] {
+			continue
+		}
 		if states[key].Availability != Live {
 			selection[key] = true
 		}
@@ -181,7 +197,14 @@ func SelectRestorable(workspace manifest.Workspace, states map[string]PaneState)
 // MapRestorable carries matching selected identities and drops panes that are
 // absent from the new target or already live.
 func MapRestorable(previous Selection, workspace manifest.Workspace, states map[string]PaneState) Selection {
+	return MapRestorableWithin(previous, workspace, states, nil)
+}
+
+// MapRestorableWithin also prevents a previous fuller target from enabling
+// context-only panes in a curated snapshot.
+func MapRestorableWithin(previous Selection, workspace manifest.Workspace, states map[string]PaneState, allowed Selection) Selection {
 	selection := MapMatching(previous, workspace)
+	RestrictSelection(selection, allowed)
 	PruneLive(selection, states)
 	return selection
 }
@@ -197,8 +220,16 @@ func PruneLive(selection Selection, states map[string]PaneState) {
 
 // ToggleRestorableTab toggles only missing panes beneath a tab.
 func ToggleRestorableTab(tab manifest.Tab, selection Selection, states map[string]PaneState) {
+	ToggleRestorableTabWithin(tab, selection, states, nil)
+}
+
+// ToggleRestorableTabWithin also excludes context-only panes.
+func ToggleRestorableTabWithin(tab manifest.Tab, selection Selection, states map[string]PaneState, allowed Selection) {
 	selected, total := 0, 0
 	for _, pane := range tab.Panes {
+		if allowed != nil && !allowed[pane.Key] {
+			continue
+		}
 		if states[pane.Key].Availability == Live {
 			continue
 		}
@@ -209,6 +240,10 @@ func ToggleRestorableTab(tab manifest.Tab, selection Selection, states map[strin
 	}
 	selectAll := selected != total
 	for _, pane := range tab.Panes {
+		if allowed != nil && !allowed[pane.Key] {
+			delete(selection, pane.Key)
+			continue
+		}
 		if states[pane.Key].Availability == Live {
 			delete(selection, pane.Key)
 			continue
@@ -234,14 +269,9 @@ func Compile(session string, targets []Target, live *manifest.Snapshot) *Plan {
 			workspaceID = workspace.ID
 		}
 		for _, tab := range target.Workspace.Tabs {
-			tabKey := manifestTabKey(tab)
-			tabID, fallbackPaneID := "", ""
-			if liveTab, ok := tabByWorkspace[target.WorkspaceKey][tabKey]; ok {
-				tabID = liveTab.ID
-				if len(liveTab.Panes) > 0 {
-					fallbackPaneID = liveTab.Panes[0].PaneID
-				}
-			}
+			tabKey, tabID, fallbackPaneID := compiledTabDestination(
+				target.WorkspaceKey, tab, states, tabByWorkspace,
+			)
 			selected, included := Selection{}, Selection{}
 			paneByKey := map[string]manifest.Pane{}
 			for _, pane := range tab.Panes {
@@ -261,6 +291,16 @@ func Compile(session string, targets []Target, live *manifest.Snapshot) *Plan {
 				mode = GeometryBestEffort
 			}
 			order, placements := layoutPlacements(tab, included, mode)
+			for paneKey, placement := range placements {
+				if placement.AnchorKey == "" {
+					continue
+				}
+				live := states[placement.AnchorKey].Live
+				if live != nil && live.WorkspaceKey == target.WorkspaceKey && live.TabID == tabID {
+					placement.AnchorKey = live.Pane.Key
+					placements[paneKey] = placement
+				}
+			}
 			for _, paneKey := range order {
 				if !selected[paneKey] {
 					continue
@@ -309,11 +349,53 @@ func Compile(session string, targets []Target, live *manifest.Snapshot) *Plan {
 	return plan
 }
 
+// compiledTabDestination maps a captured tab to a live destination. A live
+// captured pane is stronger evidence than a tab title: agent terminals often
+// rewrite titles after launch. If evidence points to more than one live tab,
+// leave the destination unresolved rather than choosing one arbitrarily.
+func compiledTabDestination(
+	workspaceKey string,
+	tab manifest.Tab,
+	states map[string]PaneState,
+	tabs map[string]map[string]manifest.Tab,
+) (tabKey, tabID, fallbackPaneID string) {
+	capturedKey := manifestTabKey(tab)
+	var matched *LivePane
+	for _, pane := range tab.Panes {
+		live := states[pane.Key].Live
+		if live == nil || live.WorkspaceKey != workspaceKey {
+			continue
+		}
+		if matched == nil {
+			copy := *live
+			matched = &copy
+			continue
+		}
+		if matched.TabID != live.TabID {
+			return capturedKey, "", ""
+		}
+	}
+	if matched != nil {
+		return matched.TabKey, matched.TabID, matched.Pane.PaneID
+	}
+	if liveTab, ok := tabs[workspaceKey][capturedKey]; ok {
+		fallback := ""
+		if len(liveTab.Panes) > 0 {
+			fallback = liveTab.Panes[0].PaneID
+		}
+		return capturedKey, liveTab.ID, fallback
+	}
+	return capturedKey, "", ""
+}
+
 func paneIdentity(pane manifest.Pane) string {
 	if pane.Name != "" {
-		return pane.Name
+		return "name:" + pane.Name
 	}
-	return pane.Key
+	if pane.SID != "" {
+		return "sid:" + pane.Agent + ":" + pane.SID
+	}
+	return "pane:" + pane.Key
 }
 
 func manifestWorkspaceKey(workspace manifest.Workspace) string {

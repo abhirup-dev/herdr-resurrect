@@ -190,7 +190,7 @@ func envDrift(man, live map[string]string) (lost, changed []string) {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		if strategy.TransientEnv(k) {
+		if strategy.ReplayTransientEnv(k, man[k]) {
 			continue
 		}
 		v, ok := live[k]

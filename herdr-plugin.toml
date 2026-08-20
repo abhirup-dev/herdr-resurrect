@@ -22,12 +22,27 @@ description = "Open the session archive and additive restoration planner."
 contexts = ["global"]
 command = ["bash", "scripts/open-browser.sh"]
 
+[[actions]]
+id = "stop-current"
+title = "Capture and Stop Current Session"
+description = "Capture the invoking session, preview the stopped topology, then ask for confirmation."
+contexts = ["global"]
+command = ["bash", "scripts/open-stop.sh"]
+
 # The interactive browser. Opens as a session-modal popup; closes when the
 # TUI exits. Also available as a plain verb: `herdr-archive browse`.
 [[panes]]
 id = "browser"
 title = "herdr-archive"
 placement = "popup"
-width = "80%"
-height = 24
+width = "90%"
+height = "80%"
 command = ["./bin/herdr-archive", "browse"]
+
+[[panes]]
+id = "stop-current"
+title = "capture & stop session"
+placement = "popup"
+width = "90%"
+height = "80%"
+command = ["./bin/herdr-archive", "browse", "--stop-current"]

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	archiveop "github.com/abhirupdas/herdr-archive/internal/archive"
 	"github.com/abhirupdas/herdr-archive/internal/capture"
 	"github.com/abhirupdas/herdr-archive/internal/herdr"
 	"github.com/abhirupdas/herdr-archive/internal/manifest"
@@ -24,13 +25,14 @@ func cmdCapture(args []string) int {
 	session := fs.String("session", "default", `herdr session name ("default" targets the default session)`)
 	name := fs.String("name", "", "durable name for this restoration target")
 	out := fs.String("out", "", "archive root (default ~/.config/herdr/archives)")
-	var workspaces stringsArg
+	var workspaces, panes stringsArg
 	fs.Var(&workspaces, "workspace", "capture only this workspace (repeatable)")
+	fs.Var(&panes, "pane", "curated capture: hydrate only this live pane id (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	snap, err := capture.Session(capture.Options{Session: *session, WorkspaceIDs: workspaces})
+	snap, err := capture.Session(capture.Options{Session: *session, WorkspaceIDs: workspaces, PaneIDs: panes})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "capture: %v\n", err)
 		return 1
@@ -74,6 +76,13 @@ func or(s, fallback string) string {
 	return s
 }
 
+func pluralWord(n int, singular string) string {
+	if n == 1 {
+		return singular
+	}
+	return singular + "s"
+}
+
 func compileSnapshotPlan(session, path string, snap, live *manifest.Snapshot) *planner.Plan {
 	var targets []planner.Target
 	for _, workspace := range snap.Workspaces {
@@ -86,7 +95,7 @@ func compileSnapshotPlan(session, path string, snap, live *manifest.Snapshot) *p
 			SnapshotName: snap.Name,
 			SnapshotPath: path,
 			Workspace:    workspace,
-			Selected:     planner.SelectWhole(workspace),
+			Selected:     planner.DefaultSelection(snap, workspace),
 		})
 	}
 	return planner.Compile(session, targets, live)
@@ -108,6 +117,7 @@ func cmdArchive(args []string) int {
 	name := fs.String("name", "", "durable name for the archive snapshot")
 	out := fs.String("out", "", "archive root (default ~/.config/herdr/archives)")
 	force := fs.Bool("force", false, "allow archiving the default session")
+	yes := fs.Bool("yes", false, "capture and stop the session")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -116,26 +126,29 @@ func cmdArchive(args []string) int {
 		return 2
 	}
 	if *session == "default" && !*force {
-		fmt.Fprintln(os.Stderr, "archive: refusing the default session (it would kill the invoking agent); use --force")
+		fmt.Fprintln(os.Stderr, "archive: refusing the default session (it would stop the invoking agent); use --force")
 		return 1
 	}
-
 	snap, err := capture.Session(capture.Options{Session: *session})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "archive: %v\n", err)
 		return 1
 	}
-	snap.Name = strings.TrimSpace(*name)
-	if snap.Name == "" {
-		snap.Name = manifest.DefaultName(snap.CreatedAt)
+	_, panes := snap.CapturedPaneCount()
+	fmt.Printf("capture and stop session %s (%d %s); state directory retained\n", *session, panes, pluralWord(panes, "pane"))
+	for _, workspace := range snap.Workspaces {
+		fmt.Printf("  STOP workspace %s\n", or(workspace.Label, workspace.ID))
+		for _, tab := range workspace.Tabs {
+			fmt.Printf("    STOP tab %s (%d %s)\n", or(tab.Label, tab.ID), len(tab.Panes), pluralWord(len(tab.Panes), "pane"))
+		}
 	}
-	path, err := snap.Save(*out)
+	if !*yes {
+		fmt.Println("dry run; apply with --yes")
+		return 0
+	}
+	path, err := archiveop.Apply(snap, *name, *out)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "archive: save: %v\n", err)
-		return 1
-	}
-	if _, err := herdr.Run("session", "stop", *session); err != nil {
-		fmt.Fprintf(os.Stderr, "archive: stop: %v (snapshot kept at %s)\n", err, path)
+		fmt.Fprintf(os.Stderr, "archive: %v\n", err)
 		return 1
 	}
 	fmt.Printf("archived %s -> %s (server stopped; state dir retained)\n", *session, path)
@@ -171,7 +184,8 @@ func cmdResume(args []string) int {
 		return 1
 	}
 	snap := full.Filter(*wsSel, *tabSel, agentSel)
-	if len(snap.Workspaces) == 0 {
+	captured, _ := snap.CapturedPaneCount()
+	if len(snap.Workspaces) == 0 || captured == 0 {
 		fmt.Fprintln(os.Stderr, "resume: selectors matched nothing")
 		return 1
 	}
@@ -283,7 +297,8 @@ func cmdUnpark(args []string) int {
 		return 1
 	}
 	snap := full.Filter(*wsSel, *tabSel, agentSel)
-	if len(snap.Workspaces) == 0 {
+	captured, _ := snap.CapturedPaneCount()
+	if len(snap.Workspaces) == 0 || captured == 0 {
 		fmt.Fprintln(os.Stderr, "unpark: selectors matched nothing")
 		return 1
 	}
