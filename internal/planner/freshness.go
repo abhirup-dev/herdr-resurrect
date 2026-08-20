@@ -41,6 +41,52 @@ func ExactWorkspaceMatch(captured manifest.Workspace, live *manifest.Snapshot) b
 	return true
 }
 
+// ExactSnapshotMatch reports whether a full snapshot still describes every
+// replay-relevant part of the live session. Capture metadata and volatile UI
+// state are ignored; scoped snapshots can never represent a complete session.
+func ExactSnapshotMatch(captured, live *manifest.Snapshot) bool {
+	if captured == nil || live == nil || captured.CaptureScope != nil || live.CaptureScope != nil ||
+		captured.Session != live.Session || len(captured.Workspaces) != len(live.Workspaces) {
+		return false
+	}
+	for workspaceIndex := range captured.Workspaces {
+		left, right := captured.Workspaces[workspaceIndex], live.Workspaces[workspaceIndex]
+		if left.ID != right.ID || left.Label != right.Label || left.Cwd != right.Cwd || len(left.Tabs) != len(right.Tabs) {
+			return false
+		}
+		for tabIndex := range left.Tabs {
+			leftTab, rightTab := left.Tabs[tabIndex], right.Tabs[tabIndex]
+			if leftTab.ID != rightTab.ID || leftTab.Label != rightTab.Label || len(leftTab.Panes) != len(rightTab.Panes) ||
+				!exactSnapshotLayoutMatch(leftTab.Layout, rightTab.Layout, len(leftTab.Panes)) {
+				return false
+			}
+			for paneIndex := range leftTab.Panes {
+				if !exactSnapshotPaneMatch(leftTab.Panes[paneIndex], rightTab.Panes[paneIndex]) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func exactSnapshotPaneMatch(left, right manifest.Pane) bool {
+	return left.Key == right.Key && left.PaneID == right.PaneID && left.Agent == right.Agent && left.Name == right.Name &&
+		left.SID == right.SID && left.SIDSource == right.SIDSource && left.Cwd == right.Cwd && left.Shell == right.Shell &&
+		left.Cmdline == right.Cmdline && reflect.DeepEqual(left.Argv, right.Argv) &&
+		reflect.DeepEqual(strategy.ReplayEnv(left.Env), strategy.ReplayEnv(right.Env))
+}
+
+func exactSnapshotLayoutMatch(left, right *manifest.Layout, paneCount int) bool {
+	if paneCount <= 1 {
+		return true
+	}
+	if left == nil || right == nil || left.Zoomed != right.Zoomed {
+		return false
+	}
+	return exactLayoutMatch(left, right, paneCount)
+}
+
 func sameWorkspaceIdentity(captured, live manifest.Workspace) bool {
 	if captured.Label != "" {
 		return captured.Label == live.Label

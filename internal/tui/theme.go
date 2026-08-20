@@ -28,7 +28,7 @@ var (
 	styTreeMeta  = styDim
 	styTreeLive  = lipgloss.NewStyle().Foreground(colorOK).Bold(true)
 	styTreeAdd   = lipgloss.NewStyle().Foreground(colorOK)
-	styTreeMiss  = lipgloss.NewStyle().Foreground(colorWarn)
+	styTreeMiss  = lipgloss.NewStyle().Foreground(colorWarn).Italic(true)
 	styTreeWarn  = lipgloss.NewStyle().Foreground(colorBad).Bold(true)
 	styFocusBar  = lipgloss.NewStyle().Foreground(colorAccent)
 

@@ -12,28 +12,45 @@ import (
 )
 
 type archivePlanMsg struct {
-	live  *manifest.Snapshot
-	path  string
-	saved bool
-	err   error
+	live   *manifest.Snapshot
+	path   string
+	saved  bool
+	reused bool
+	forced bool
+	err    error
 }
 
 func loadArchivePlanCmd(session string) tea.Cmd {
-	return func() tea.Msg {
-		live, err := capture.Session(capture.Options{Session: session})
-		return archivePlanMsg{live: live, err: err}
-	}
+	return loadStopPlanCmd(session, false, false)
 }
 
 func loadSavedStopPlanCmd(session string) tea.Cmd {
+	return loadStopPlanCmd(session, true, false)
+}
+
+func loadForcedStopPlanCmd(session string) tea.Cmd {
+	return loadStopPlanCmd(session, true, true)
+}
+
+func loadStopPlanCmd(session string, saveIfChanged, force bool) tea.Cmd {
 	return func() tea.Msg {
 		live, err := capture.Session(capture.Options{Session: session})
 		if err != nil {
-			return archivePlanMsg{err: err}
+			return archivePlanMsg{forced: force, err: err}
+		}
+		if !force {
+			if path, err := manifest.Latest("", session); err == nil {
+				if previous, err := manifest.Load(path); err == nil && planner.ExactSnapshotMatch(previous, live) {
+					return archivePlanMsg{live: previous, path: path, saved: true, reused: true}
+				}
+			}
+		}
+		if !saveIfChanged {
+			return archivePlanMsg{live: live}
 		}
 		live.Name = "Session stop capture · " + manifest.DefaultName(live.CreatedAt)
 		path, err := live.Save("")
-		return archivePlanMsg{live: live, path: path, saved: err == nil, err: err}
+		return archivePlanMsg{live: live, path: path, saved: err == nil, forced: force, err: err}
 	}
 }
 
@@ -42,6 +59,7 @@ func (m *model) startArchiveReview(name string) tea.Cmd {
 	m.archiveLive = nil
 	m.archivePath = ""
 	m.archivePreSaved = false
+	m.archiveReused = false
 	m.archivePreview = false
 	m.archiveScroll = 0
 	m.confirm = ""
@@ -87,8 +105,12 @@ func (m *model) deletionConfirmationBody() string {
 		name = "automatic date and time"
 	}
 	var body string
-	if m.archivePreSaved {
+	if m.archiveReused {
+		body += styOK.Render("CAPTURE SKIPPED") + styDim.Render(" · reusing "+snapshotName(m.archiveLive))
+	} else if m.archivePreSaved {
 		body += styOK.Render("CAPTURE SAVED") + styDim.Render(" · "+m.archiveName)
+	}
+	if m.archivePreSaved {
 		if m.archivePath != "" {
 			body += "\n" + styDim.Render(m.archivePath)
 		}
@@ -104,7 +126,11 @@ func (m *model) deletionConfirmationBody() string {
 	body += "\n" + styDim.Render("name: "+name)
 	panes := snapshotPaneCount(m.archiveLive)
 	body += "\n\n" + styBad.Render(fmt.Sprintf("%d LIVE %s WILL STOP", panes, strings.ToUpper(plural(panes, "pane"))))
-	body += "\n" + styDim.Render("The full live session is captured first. Its Herdr state directory is retained.")
+	if m.archiveReused {
+		body += "\n" + styDim.Render("The latest full snapshot still matches the replayable live state, so no duplicate was written.")
+	} else {
+		body += "\n" + styDim.Render("The full live session is captured first. Its Herdr state directory is retained.")
+	}
 	body += "\n" + styWarn.Render("This confirmation stops the entire session, including the pane running this browser if applicable.")
 	return body
 }

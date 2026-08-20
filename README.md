@@ -135,10 +135,10 @@ descendants while already-live panes are dim, non-focusable, and skipped by
 `j/k`. `p` previews the collapsed selected topology. `R` opens the compiled
 visual BEFORE / AFTER diff from either level; `y` executes those exact additive
 operations and refreshes live state. `backspace` clears the composite selection.
-Long custom pickers, confirmations, and previews share one viewport. Focused rows
-stay near the vertical center where possible; passive views scroll with `j/k`.
-The hotkey footer remains pinned while content moves. Workspaces represented in
-the current `last` capture are ordered first.
+Long custom pickers, confirmations, and previews share one Bubbles v2 viewport
+implementation. Focused rows use the component's native visibility behavior;
+passive views scroll with `j/k`, and the hotkey footer remains pinned. Workspaces
+represented in the current `last` capture are ordered first.
 
 `c` opens a live topology picker. Workspace, tab, and pane nodes are tri-state;
 `space` and `tab` both toggle selection before the optional naming dialog. A
@@ -150,17 +150,20 @@ Level 2).
 `x` is available from Levels 1–3 and opens a destructive capture-and-stop plan.
 The current session is summarized by workspace by default; `p` expands it into
 the full workspace/tab/pane tree, including each pane's detected provider. The
-hotkey footer stays pinned while `j/k` scroll the expanded tree. Nothing happens
-until explicit `y` confirmation.
+hotkey footer stays pinned while `j/k` scroll the expanded tree. If the latest
+full snapshot exactly matches the replayable live state, capture is skipped and
+that snapshot is reused; `C` forces a fresh full snapshot from the confirmation
+window. Nothing stops until explicit `y` confirmation.
 
-`prefix+Alt-Q` is the direct current-session shutdown flow. It first saves a
-`Session stop capture · <date/time>` snapshot, then opens the same current-session
-visualization and asks whether to stop that session. Cancelling leaves the
-session running and keeps the already-saved snapshot. Execution verifies the
-live topology against that exact saved snapshot and rejects the operation if it
-changed meanwhile. From the named capture dialog, `ctrl+x` reaches the same
-plan. Capture-and-stop requires every live pane to be selected; partial captures
-are capture-only.
+`prefix+Alt-Q` is the direct current-session shutdown flow. It applies the same
+reuse check before writing a `Session stop capture · <date/time>` snapshot, then
+opens the current-session visualization and asks whether to stop. Cancelling
+leaves the session running and retains whichever snapshot was selected or newly
+written. Execution rechecks the complete replayable state—including pane payload,
+environment, CWD, command, identity, and layout—and rejects any drift before
+mutation. From the named capture dialog, `ctrl+x` reaches the same plan.
+Capture-and-stop requires every live pane to be selected; partial captures are
+capture-only.
 
 ### Brand images
 

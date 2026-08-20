@@ -8,6 +8,7 @@ import (
 	"github.com/abhirupdas/herdr-archive/internal/capture"
 	"github.com/abhirupdas/herdr-archive/internal/herdr"
 	"github.com/abhirupdas/herdr-archive/internal/manifest"
+	"github.com/abhirupdas/herdr-archive/internal/planner"
 )
 
 // Apply saves the exact snapshot shown during confirmation, after rejecting a
@@ -50,45 +51,8 @@ func verify(planned *manifest.Snapshot) error {
 	if err != nil {
 		return fmt.Errorf("freshness capture: %w", err)
 	}
-	if !sameTopology(planned, current) {
-		return fmt.Errorf("stale capture-and-stop plan: live topology changed after confirmation")
+	if !planner.ExactSnapshotMatch(planned, current) {
+		return fmt.Errorf("stale capture-and-stop plan: replayable live state changed after confirmation")
 	}
 	return nil
-}
-
-func sameTopology(left, right *manifest.Snapshot) bool {
-	if left == nil || right == nil || left.Session != right.Session || len(left.Workspaces) != len(right.Workspaces) {
-		return false
-	}
-	rightWorkspaces := map[string]manifest.Workspace{}
-	for _, workspace := range right.Workspaces {
-		rightWorkspaces[workspace.ID] = workspace
-	}
-	for _, workspace := range left.Workspaces {
-		other, ok := rightWorkspaces[workspace.ID]
-		if !ok || workspace.Label != other.Label || len(workspace.Tabs) != len(other.Tabs) {
-			return false
-		}
-		rightTabs := map[string]manifest.Tab{}
-		for _, tab := range other.Tabs {
-			rightTabs[tab.ID] = tab
-		}
-		for _, tab := range workspace.Tabs {
-			otherTab, ok := rightTabs[tab.ID]
-			if !ok || tab.Label != otherTab.Label || len(tab.Panes) != len(otherTab.Panes) {
-				return false
-			}
-			rightPanes := map[string]manifest.Pane{}
-			for _, pane := range otherTab.Panes {
-				rightPanes[pane.PaneID] = pane
-			}
-			for _, pane := range tab.Panes {
-				otherPane, ok := rightPanes[pane.PaneID]
-				if !ok || pane.Key != otherPane.Key || pane.Agent != otherPane.Agent || pane.Name != otherPane.Name {
-					return false
-				}
-			}
-		}
-	}
-	return true
 }

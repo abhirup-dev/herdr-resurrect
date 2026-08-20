@@ -122,6 +122,7 @@ type model struct {
 	archiveName       string
 	archivePath       string
 	archivePreSaved   bool
+	archiveReused     bool
 	archivePreview    bool
 	archiveScroll     int
 	startupCmd        tea.Cmd
@@ -970,49 +971,21 @@ func (m *model) plannerView() string {
 	cursorLine := -1
 	lastWorkspace := ""
 	for index, target := range m.targets {
+		stats := m.collectPlannerTargetStats(target)
+		workspaceMissing := stats.workspaceMissing()
 		if target.key != lastWorkspace {
 			if lastWorkspace != "" {
 				left = append(left, "")
 			}
-			left = append(left, styTitle.Render(fitLine(target.key, leftWidth)))
+			left = append(left, plannerWorkspaceHeading(target.key, leftWidth, workspaceMissing))
 			lastWorkspace = target.key
 		}
 		marker := styDim.Render("○")
 		if planned, ok := m.workspacePlan[target.key]; ok && planned.target.path == target.path {
 			marker = selectionMarker(planned, m.live)
 		}
-		badge := ""
-		if target.snapshot.CaptureScope != nil {
-			badge = " " + styNice.Render("CURATED")
-		} else if target.isLast {
-			if planner.ExactWorkspaceMatch(target.workspace, m.live) {
-				badge = " " + treeLive("CURRENT")
-			} else {
-				badge = " " + treeMissing("STALE")
-			}
-		}
-
-		agents, tabs, size := workspaceStats(target.snapshot, target.workspace)
-		details := []string{
-			treeNeutral(relTime(target.snapshot.CreatedAt.Local())),
-			treeNeutral(fmt.Sprintf("%d %s", agents, plural(agents, "agent"))),
-			treeNeutral(fmt.Sprintf("%d %s", tabs, plural(tabs, "tab"))),
-		}
-		if m.live != nil {
-			states := m.targetStates(target)
-			_, missing, liveCount := planner.RestorableCountWithin(target.workspace, nil, states, targetAllowed(target))
-			liveMeta := treeNeutral(fmt.Sprintf("%d live", liveCount))
-			if liveCount > 0 {
-				liveMeta = treeLive(fmt.Sprintf("%d live", liveCount))
-			}
-			missingMeta := treeNeutral("0 missing")
-			if missing > 0 {
-				missingMeta = treeMissing(fmt.Sprintf("%d missing", missing))
-			}
-			details = append(details, liveMeta, missingMeta)
-		}
-		details = append(details, treeNeutral(humanBytes(size)))
-		detailLine := treeMetadata(details...)
+		badge := plannerTargetBadge(target, m.live)
+		detailLine := plannerTargetDetails(target, stats)
 
 		nameBudget := max(8, leftWidth-ansi.StringWidth(marker)-ansi.StringWidth(badge)-2)
 		targetLine := marker + " " + styTreeLabel.Render(fitLine(snapshotName(target.snapshot), nameBudget)) + badge
@@ -1381,20 +1354,6 @@ func workspaceKey(workspace manifest.Workspace) string {
 	return workspace.ID
 }
 
-func workspaceStats(snapshot *manifest.Snapshot, workspace manifest.Workspace) (agents, tabs int, size int64) {
-	tabs = len(workspace.Tabs)
-	for _, tab := range workspace.Tabs {
-		for _, pane := range tab.Panes {
-			if pane.Agent == "" || !snapshot.CapturesPane(workspace.ID, tab.ID, pane.Key) {
-				continue
-			}
-			agents++
-			size += strategy.TranscriptSize(pane.Agent, pane.SID, pane.Env)
-		}
-	}
-	return
-}
-
 func layoutLabel(tab manifest.Tab) string {
 	count := len(tab.Panes)
 	base := fmt.Sprintf("%d %s", count, plural(count, "pane"))
@@ -1663,7 +1622,9 @@ func (m *model) title() string {
 	}
 	if m.confirm == "archive" {
 		page := "review capture & stop"
-		if m.archivePreSaved {
+		if m.archiveReused {
+			page = "snapshot reused › confirm stop"
+		} else if m.archivePreSaved {
 			page = "session captured › confirm stop"
 		}
 		return base + styDim.Render("  › "+m.cur.name+" › "+page)
@@ -1735,9 +1696,9 @@ func (m *model) footer() string {
 			preview = hintItem{"p", "collapse session"}
 		}
 		if m.archivePreSaved {
-			return renderHints(preview, hintItem{"j/k", "scroll"}, hintItem{"y", "stop captured session"}, hintItem{"esc", "keep running"})
+			return renderHints(preview, hintItem{"C", "capture fresh"}, hintItem{"j/k", "scroll"}, hintItem{"y", "stop captured session"}, hintItem{"esc", "keep running"})
 		}
-		return renderHints(preview, hintItem{"j/k", "scroll"}, hintItem{"y", "capture & stop session"}, hintItem{"esc", "cancel"})
+		return renderHints(preview, hintItem{"C", "capture fresh"}, hintItem{"j/k", "scroll"}, hintItem{"y", "capture & stop session"}, hintItem{"esc", "cancel"})
 	}
 	switch m.mode {
 	case viewSessions:
@@ -1931,18 +1892,23 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case archivePlanMsg:
 		m.spinning = false
+		m.err = msg.err
+		if msg.err != nil {
+			if msg.forced && m.archiveLive != nil {
+				m.note = "fresh capture failed; existing stop plan retained: " + msg.err.Error()
+				return m, nil
+			}
+			m.note = "capture-and-stop plan unavailable: " + msg.err.Error()
+			return m, nil
+		}
 		m.archiveLive = msg.live
 		m.archivePath = msg.path
 		m.archivePreSaved = msg.saved
+		m.archiveReused = msg.reused
 		m.archivePreview = false
 		m.archiveScroll = 0
 		if msg.live != nil && msg.live.Name != "" {
 			m.archiveName = msg.live.Name
-		}
-		m.err = msg.err
-		if msg.err != nil {
-			m.note = "capture-and-stop plan unavailable: " + msg.err.Error()
-			return m, nil
 		}
 		m.note = ""
 		m.confirm = "archive"
@@ -2136,6 +2102,13 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.confirm != "" {
 		switch msg.String() {
+		case "C":
+			if m.confirm == "archive" && m.cur != nil && !m.spinning {
+				m.spinning = true
+				m.note = "capturing a fresh full snapshot…"
+				return m, tea.Batch(loadForcedStopPlanCmd(m.cur.name), m.spin.Tick)
+			}
+			return m, nil
 		case "p":
 			if m.confirm == "archive" {
 				m.archivePreview = !m.archivePreview
@@ -2157,6 +2130,9 @@ func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "y":
+			if m.spinning {
+				return m, nil
+			}
 			if m.confirm == "archive" {
 				return m.execArchive()
 			}
@@ -2706,6 +2682,7 @@ func (m *model) execArchive() (tea.Model, tea.Cmd) {
 	m.archiveLive = nil
 	m.archivePath = ""
 	m.archivePreSaved = false
+	m.archiveReused = false
 	m.spinning = true
 	m.note = "stopping " + name + "…"
 	apply := func() tea.Msg {
